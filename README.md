@@ -57,6 +57,15 @@ Open `http://localhost:5173` and click **START**.
 
 ## Version History
 
+### V4.3.2 — Correctness + Clarity Patch
+- Half-open CB cap now true NOTIONAL (converted to qty via side price)
+- Half-open probe accounting uses real fill notional (qty × price)
+- Sizing from live state: equity, DD, remaining notional/position/category room
+- Pruning rewritten: flat-array return, transitive lineage closure, bounded iteration
+- Risk clarity: explicit names (requestedQty/allowedQty/sidePrice/additionalNotional)
+- Attribution hardened against null/array/NaN/Infinity attr
+- 12 new tests (115 total, all passing)
+
 ### V4.3.1 — Meta-Alpha Attribution Correctness
 - Fill-level source lineage (`fill.attr` from originating order)
 - Realized PnL attributed per-fill via actual lineage

@@ -1,34 +1,49 @@
 import { useState, useEffect, useRef } from "react";
 
 // ═══════════════════════════════════════════════════════════════════════
-//  POLYMARKET V4.3.2 — CORRECTNESS + CLARITY PATCH
+//  POLYMARKET V4.3.1 — META-ALPHA ATTRIBUTION CORRECTNESS PATCH
 //
-//  Patch from V4.3.1 (all fixes preserve determinism & replay safety):
-//   C1. Half-open CB cap is now true NOTIONAL, converted to qty via side price
-//       (was treating notional literal as a qty cap — wrong units).
-//   C2. Half-open accounting uses actual fill notional (qty × price),
-//       not totalFilled (which was qty).
-//   C3. Recommendation sizing uses live state:
-//       - live equity (not CFG.initialEquity hardcoded)
-//       - drawdown scale applied to capital base
-//       - remaining gross-notional room clamp
-//       - remaining position qty clamp
-//       - half-open CB notional clamp
-//   C4. Pruning rewritten for clarity + correctness:
-//       - always returns a flat array
-//       - transitive closure over parent/replacedBy chains
-//       - retention cap respected; min-terminal retention honored
-//   C5. Risk clarity: renamed variables in preTradeRisk:
-//       requestedQty / allowedQty / sidePrice / additionalNotional /
-//       remainingNotionalCapacity / existingQty / existingCatQty.
-//       qty-based and notional-based checks are visually distinct.
-//   C6. Attribution: added array-attr guard in applyAttributionEvents.
-//       Closing-only attribution already correct; tests added.
-//   C7. FSM safety: terminal immutability verified by new tests.
+//  Patch from V4.3:
+//   A1. FILL-LEVEL SOURCE LINEAGE
+//       - Each fill now carries `attr` from its originating order
+//       - Fill→Order→Signal source chain is explicit and immutable
+//       - Replacement/unwind orders inherit parent attr (unchanged)
 //
-//  Preserved from V4.3.1:
-//   [A1-A4] Fill-level attribution correctness
-//   [P1-P7] FSM hardening, partial fills, dedup, recon, CB, determinism
+//   A2. REALIZED PNL ATTRIBUTION BY ACTUAL LINEAGE
+//       - Removed "most recent order in market" lookup (.pop() bug)
+//       - applyFills now emits per-fill attribution events when rPnL
+//         is generated (closing opposite-side quantity)
+//       - Each attribution event carries the closing fill's attr +
+//         the exact realized PnL amount for that fill
+//
+//   A3. PARTIAL CLOSE ATTRIBUTION
+//       - When a fill partially closes opposite qty, only the
+//         closing portion's realized PnL is attributed
+//       - Remaining qty that opens new position generates no rPnL
+//         event (correctly: no PnL to attribute)
+//
+//   A4. DETERMINISTIC ATTRIBUTION INPUTS
+//       - applyAttributionEvents is pure: (metaPerf, events) → metaPerf
+//       - No unrealized PnL learning
+//       - No fill-quality proxy learning
+//       - Same fills + same attr = same metaPerf updates under replay
+//
+//  Preserved from V4.3:
+//   [P1] Order FSM: 7 states, terminal immutable
+//   [P2] Partial fills: RETRY/REPLACE/UNWIND/CANCEL
+//   [P3] Duplicate fill protection
+//   [P4] Reconciliation: fills source of truth
+//   [P5] Circuit breaker: pure, windowed, 6 triggers
+//   [P6] Determinism: sequence counter, injected time
+//   [P7] Spawn/prune/deferred hardening
+//   [1] Realized PnL: weighted avg cost
+//   [2] YES/NO complementary: net/gross exposure
+//   [7] Slippage: maxSlipBps enforcement
+//   [8] Clock: injected time
+//   [9] Reconciliation: idempotent fill dedup
+//   [10] Market validation: price/spread/depth/staleness
+//
+//  Architecture: ENGINE (pure) | UI (render-only) — single file
 // ═══════════════════════════════════════════════════════════════════════
 
 // ══════════════════════ ENGINE: PRNG ══════════════════════════════════
@@ -264,114 +279,28 @@ function arbSigs(mkts, hists, time) {
 }
 
 // ══════════════════════ ENGINE: SIGNAL PROCESSING ════════════════════
-// [C3] Sizing uses LIVE state:
-//      - current equity (not hardcoded initial equity)
-//      - drawdown scale applied to capital base
-//      - remaining gross notional room
-//      - remaining per-market position qty room
-//      - remaining per-category position qty room
-//      - half-open CB notional cap (converted to qty via side price)
-// Pre-trade risk still runs the authoritative check, but sizing requests
-// are kept close to what actually fits, reducing noisy rejects.
-function processSigs(signals, weights, regConf, time, liveState) {
-  const live = liveState || {};
-  const liveEquity = typeof live.equity === "number" && live.equity > 0 ? live.equity : CFG.initialEquity;
-  const liveDD = typeof live.currentDD === "number" ? live.currentDD : 0;
-  const liveGross = typeof live.grossExposure === "number" ? live.grossExposure : 0;
-  const livePositions = live.positions || {};
-  const liveMarkets = live.markets || {};
-  const liveCbState = live.cbState || "closed";
-
-  // Drawdown-scaled capital base (0 at/above maxDD, linear-ish above softDD)
-  const ddScale = liveDD >= CFG.maxDD ? 0 : liveDD > CFG.softDD ? 1 - Math.pow(liveDD / CFG.maxDD, 1.5) : 1;
-  const capitalBase = liveEquity * ddScale;
-  const remainingNotionalRoom = Math.max(0, CFG.maxExpNotional - liveGross);
-
-  // 1. Freshness + expiry filter
+function processSigs(signals, weights, regConf, time) {
   let sigs = signals.filter(s => s.exp > time && (time - s.time) / (s.exp - s.time) < 0.8);
-  // 2. Time-decayed edge
-  sigs = sigs.map(s => {
-    const fr = Math.pow(0.5, (time - s.time) / (s.hl || 300000));
-    return { ...s, fr: +fr.toFixed(3), ee: +(s.edge * fr).toFixed(4) };
-  });
-  // 3. Best signal per source/market
-  const best = {};
-  for (const s of sigs) {
-    const k = s.source + ":" + s.cid;
-    if (!best[k] || s.ee > best[k].ee) best[k] = s;
-  }
+  sigs = sigs.map(s => { const fr = Math.pow(0.5, (time - s.time) / (s.hl || 300000)); return { ...s, fr: +fr.toFixed(3), ee: +(s.edge * fr).toFixed(4) }; });
+  const best = {}; for (const s of sigs) { const k = s.source + ":" + s.cid; if (!best[k] || s.ee > best[k].ee) best[k] = s; }
   sigs = Object.values(best).filter(s => (s.qs || 0.5) > 0.15);
-  // 4. Group by market for composite signal
-  const byM = {};
-  for (const s of sigs) (byM[s.cid] || (byM[s.cid] = [])).push(s);
-
+  const byM = {}; for (const s of sigs) (byM[s.cid] || (byM[s.cid] = [])).push(s);
   const recs = [];
   for (const [mid, ms] of Object.entries(byM)) {
-    // Composite direction and confidence
-    let comp = 0;
-    for (const s of ms) comp += s.ee * (s.dir === "BUY_YES" ? 1 : -1) * s.conf * (weights[s.source] || 0.33);
+    let comp = 0; for (const s of ms) comp += s.ee * (s.dir === "BUY_YES" ? 1 : -1) * s.conf * (weights[s.source] || 0.33);
     const signs = ms.map(s => s.dir === "BUY_YES" ? 1 : -1);
     const conc = Math.abs(signs.reduce((a, b) => a + b, 0)) / signs.length;
     const conf = +cl(0.4 * conc + 0.3 * cl(Math.abs(comp) * 2, 0, 1) + 0.15 * cl(ms.length / 3, 0, 1) + 0.15 * regConf, 0, 0.95).toFixed(3);
     const dir = comp >= 0 ? "BUY_YES" : "BUY_NO";
-    const ae = Math.abs(comp) * (0.5 + conc * 0.5);
-    if (ae < 0.006) continue;
-
-    // Kelly fraction (hard-capped 25% of capital for safety)
+    const ae = Math.abs(comp) * (0.5 + conc * 0.5); if (ae < 0.006) continue;
     const px = ms[0].px || 0.5;
     const odds = comp > 0 ? px / (1 - px + 1e-4) : (1 - px) / (px + 1e-4);
-    const kelly = cl((ae * odds - (1 - ae)) / (odds + 1e-4) * 0.5, 0, 0.25) * conf;
-
-    // Side price: what we actually pay per share on our chosen side
-    const mkt = liveMarkets[mid];
-    const sidePrice = mkt ? (dir === "BUY_YES" ? mkt.yes : 1 - mkt.yes) : 0.5;
-
-    // Desired size from live capital (not hardcoded initialEquity)
-    let desiredQty = Math.floor(kelly * capitalBase);
-
-    // Clamp by remaining gross-notional room
-    if (sidePrice > 0) {
-      const qtyByNotional = Math.floor(remainingNotionalRoom / sidePrice);
-      desiredQty = Math.min(desiredQty, qtyByNotional);
-    }
-
-    // Clamp by remaining per-market position room (YES+NO combined)
-    const pos = livePositions[mid] || { yesQty: 0, noQty: 0 };
-    const remainingMarketQty = Math.max(0, CFG.maxPos - pos.yesQty - pos.noQty);
-    desiredQty = Math.min(desiredQty, remainingMarketQty);
-
-    // Clamp by remaining per-category position room
-    if (mkt) {
-      let catQty = 0;
-      for (const [otherMid, otherPos] of Object.entries(livePositions)) {
-        const otherMkt = liveMarkets[otherMid];
-        if (otherMkt && otherMkt.cat === mkt.cat) catQty += otherPos.yesQty + otherPos.noQty;
-      }
-      const remainingCatQty = Math.max(0, CFG.maxCatQty - catQty);
-      desiredQty = Math.min(desiredQty, remainingCatQty);
-    }
-
-    // [C1] Half-open CB: convert notional cap → qty cap
-    if (liveCbState === "half_open" && sidePrice > 0) {
-      const halfOpenMaxQty = Math.floor(CFG.cbHalfOpenMaxNotional / sidePrice);
-      desiredQty = Math.min(desiredQty, halfOpenMaxQty);
-    }
-
-    if (desiredQty < 15) continue;
-
-    // Attribution percentages (source contribution to composite edge)
-    const attr = {};
-    ms.forEach(s => { attr[s.source] = (attr[s.source] || 0) + s.ee * s.conf; });
+    const k = cl((ae * odds - (1 - ae)) / (odds + 1e-4) * 0.5, 0, 0.25) * conf;
+    const sz = Math.floor(k * CFG.initialEquity); if (sz < 15) continue;
+    const attr = {}; ms.forEach(s => { attr[s.source] = (attr[s.source] || 0) + s.ee * s.conf; });
     const ta = Object.values(attr).reduce((s, v) => s + Math.abs(v), 0) || 1;
     Object.keys(attr).forEach(k2 => attr[k2] = +((Math.abs(attr[k2]) / ta) * 100).toFixed(1));
-
-    recs.push({
-      id: "rec_" + mid + "_" + time, time, cid: mid, dir,
-      ce: +ae.toFixed(4), conf, conc: +conc.toFixed(2),
-      sz: desiredQty, attr, nSigs: ms.length,
-      urg: ae > 0.025 ? "immediate" : ae > 0.012 ? "patient" : "passive",
-      aq: +(ms.reduce((s, x) => s + (x.qs || 0.5), 0) / ms.length).toFixed(3),
-    });
+    recs.push({ id: "rec_" + mid + "_" + time, time, cid: mid, dir, ce: +ae.toFixed(4), conf, conc: +conc.toFixed(2), sz, attr, nSigs: ms.length, urg: ae > 0.025 ? "immediate" : ae > 0.012 ? "patient" : "passive", aq: +(ms.reduce((s, x) => s + (x.qs || 0.5), 0) / ms.length).toFixed(3) });
   }
   return { filtered: sigs, recs };
 }
@@ -395,115 +324,56 @@ function calcExposure(positions, markets) {
   return { gross: +gross.toFixed(2), net: +net.toFixed(2), catNotional, catQty };
 }
 
-// [C5] Pre-trade risk — explicit names, qty vs notional clearly separated.
-// Sequence: CB → MarketPos (qty) → GrossExposure (notional) → DD →
-//           Category (qty) → Liquidity → SignalQuality → MarketQuarantine.
-// Each check either PASSES, ADJUSTS allowedQty downward, or BLOCKS.
+// [P2] Pre-trade risk: notional vs quantity separated
 function preTradeRisk(rec, snap) {
   const { positions, markets, cb, currentDD, grossExposure } = snap;
-  const checks = [];
-  let approved = true;
-  const requestedQty = rec.sz;
-  let allowedQty = requestedQty;
+  const ch = []; let ok = true, sz = rec.sz;
 
-  // Side price: used for notional calculations. Based on order direction.
-  const mkt = markets[rec.cid];
-  const sidePrice = mkt ? (rec.dir === "BUY_YES" ? mkt.yes : 1 - mkt.yes) : 0.5;
+  // CB check — [P5] recentRejects is now windowed array
+  if (cb.state === "open") { ch.push({ n: "CB", s: "blocked", d: cb.reason }); ok = false; }
+  else if (cb.state === "half_open") {
+    if (sz > CFG.cbHalfOpenMaxNotional) { sz = CFG.cbHalfOpenMaxNotional; ch.push({ n: "CB", s: "adjusted", d: "half_open probe cap " + CFG.cbHalfOpenMaxNotional }); }
+    else ch.push({ n: "CB", s: "adjusted", d: "half_open probe" });
+  } else ch.push({ n: "CB", s: "pass", d: "closed" });
 
-  // ─── Check 1: Circuit breaker ───
-  if (cb.state === "open") {
-    checks.push({ n: "CB", s: "blocked", d: cb.reason });
-    approved = false;
-  } else if (cb.state === "half_open") {
-    // [C1] Half-open cap is NOTIONAL. Convert to qty using side price.
-    const halfOpenMaxQty = sidePrice > 0 ? Math.floor(CFG.cbHalfOpenMaxNotional / sidePrice) : 0;
-    if (allowedQty > halfOpenMaxQty) {
-      allowedQty = halfOpenMaxQty;
-      checks.push({ n: "CB", s: "adjusted", d: "half_open probe: notional cap $" + CFG.cbHalfOpenMaxNotional + " → qty " + halfOpenMaxQty });
-    } else {
-      checks.push({ n: "CB", s: "adjusted", d: "half_open probe" });
-    }
-    if (allowedQty <= 0) approved = false;
-  } else {
-    checks.push({ n: "CB", s: "pass", d: "closed" });
-  }
-
-  // ─── Check 2: Per-market position qty limit ───
+  // [P2] Position limit: QUANTITY-based
   const pos = positions[rec.cid] || { yesQty: 0, noQty: 0 };
-  const existingQty = pos.yesQty + pos.noQty;
-  if (existingQty + allowedQty > CFG.maxPos) {
-    allowedQty = Math.max(0, CFG.maxPos - existingQty);
-    checks.push({ n: "PosQty", s: allowedQty > 0 ? "adjusted" : "blocked", d: "qty:" + existingQty + "+" + allowedQty + "/" + CFG.maxPos });
-    if (allowedQty <= 0) approved = false;
-  } else {
-    checks.push({ n: "PosQty", s: "pass", d: "qty:" + (existingQty + allowedQty) + "/" + CFG.maxPos });
-  }
+  const existQty = pos.yesQty + pos.noQty;
+  if (existQty + sz > CFG.maxPos) { sz = Math.max(0, CFG.maxPos - existQty); ch.push({ n: "PosQty", s: sz > 0 ? "adjusted" : "blocked", d: "qty:" + existQty + "+" + sz + "/" + CFG.maxPos }); if (!sz) ok = false; }
+  else ch.push({ n: "PosQty", s: "pass", d: "qty:" + (existQty + sz) + "/" + CFG.maxPos });
 
-  // ─── Check 3: Gross exposure notional limit ───
-  const additionalNotional = +(allowedQty * sidePrice).toFixed(2);
-  const remainingNotionalCapacity = Math.max(0, CFG.maxExpNotional - grossExposure);
-  if (additionalNotional > remainingNotionalCapacity) {
-    const maxQtyByNotional = sidePrice > 0 ? Math.floor(remainingNotionalCapacity / sidePrice) : 0;
-    allowedQty = Math.min(allowedQty, maxQtyByNotional);
-    const finalNotional = +(allowedQty * sidePrice).toFixed(0);
-    checks.push({ n: "ExpN", s: allowedQty > 0 ? "adjusted" : "blocked", d: "notional:" + grossExposure + "+" + finalNotional + "/" + CFG.maxExpNotional });
-    if (allowedQty <= 0) approved = false;
-  } else {
-    checks.push({ n: "ExpN", s: "pass", d: "notional:" + grossExposure + "+" + additionalNotional + "/" + CFG.maxExpNotional });
-  }
+  // [P2] Exposure limit: NOTIONAL-based (qty * est price)
+  const mkt = markets[rec.cid];
+  const estPx = mkt ? (rec.dir === "BUY_YES" ? mkt.yes : 1 - mkt.yes) : 0.5;
+  const addNotional = +(sz * estPx).toFixed(2);
+  if (grossExposure + addNotional > CFG.maxExpNotional) {
+    const maxAddNotional = Math.max(0, CFG.maxExpNotional - grossExposure);
+    const maxQty = estPx > 0 ? Math.floor(maxAddNotional / estPx) : 0;
+    sz = Math.min(sz, maxQty);
+    ch.push({ n: "ExpN", s: sz > 0 ? "adjusted" : "blocked", d: "notional:" + grossExposure + "+" + (+(sz * estPx).toFixed(0)) + "/" + CFG.maxExpNotional });
+    if (!sz) ok = false;
+  } else ch.push({ n: "ExpN", s: "pass", d: "notional:" + grossExposure + "+" + addNotional + "/" + CFG.maxExpNotional });
 
-  // ─── Check 4: Drawdown size scaler ───
-  const ddScale = currentDD >= CFG.maxDD ? 0 : currentDD > CFG.softDD ? 1 - Math.pow(currentDD / CFG.maxDD, 1.5) : 1;
-  if (ddScale < 1) {
-    allowedQty = Math.floor(allowedQty * ddScale);
-    checks.push({ n: "DD", s: ddScale > 0 ? "adjusted" : "blocked", d: "scale=" + ddScale.toFixed(2) });
-    if (allowedQty <= 0) approved = false;
-  } else {
-    checks.push({ n: "DD", s: "pass", d: (currentDD * 100).toFixed(1) + "%" });
-  }
+  // DD
+  const scale = currentDD >= CFG.maxDD ? 0 : currentDD > CFG.softDD ? 1 - Math.pow(currentDD / CFG.maxDD, 1.5) : 1;
+  if (scale < 1) { sz = Math.floor(sz * scale); ch.push({ n: "DD", s: scale > 0 ? "adjusted" : "blocked", d: "s=" + scale.toFixed(2) }); if (!sz) ok = false; }
+  else ch.push({ n: "DD", s: "pass", d: (currentDD * 100).toFixed(1) + "%" });
 
-  // ─── Check 5: Per-category qty limit ───
-  let existingCatQty = 0;
-  if (mkt) {
-    for (const [otherMid, otherPos] of Object.entries(positions)) {
-      const otherMkt = markets[otherMid];
-      if (otherMkt && otherMkt.cat === mkt.cat) existingCatQty += otherPos.yesQty + otherPos.noQty;
-    }
-  }
-  if (existingCatQty + allowedQty > CFG.maxCatQty) {
-    allowedQty = Math.max(0, CFG.maxCatQty - existingCatQty);
-    checks.push({ n: "CatQty", s: allowedQty > 0 ? "adjusted" : "blocked", d: (mkt?.cat) + ":qty=" + existingCatQty + "+" + allowedQty + "/" + CFG.maxCatQty });
-    if (allowedQty <= 0) approved = false;
-  } else {
-    checks.push({ n: "CatQty", s: "pass", d: (mkt?.cat) + ":qty=" + (existingCatQty + allowedQty) + "/" + CFG.maxCatQty });
-  }
+  // [P2] Category cap: explicitly QUANTITY-based
+  const catQ = Object.entries(positions).reduce((s, [id, p]) => { const m2 = markets[id]; return m2 && m2.cat === mkt?.cat ? s + p.yesQty + p.noQty : s; }, 0);
+  if (catQ + sz > CFG.maxCatQty) { sz = Math.max(0, CFG.maxCatQty - catQ); ch.push({ n: "CatQty", s: sz > 0 ? "adjusted" : "blocked", d: (mkt?.cat) + ":qty=" + catQ + "+" + sz + "/" + CFG.maxCatQty }); if (!sz) ok = false; }
+  else ch.push({ n: "CatQty", s: "pass", d: (mkt?.cat) + ":qty=" + (catQ + sz) + "/" + CFG.maxCatQty });
 
-  // ─── Check 6: Liquidity (ADV / requestedQty) ───
-  const liqRatio = mkt && allowedQty > 0 ? mkt.adv / allowedQty : 999;
-  if (liqRatio < CFG.minLiqRatio) {
-    checks.push({ n: "Liq", s: "blocked", d: liqRatio.toFixed(1) });
-    approved = false;
-  } else {
-    checks.push({ n: "Liq", s: "pass", d: liqRatio.toFixed(1) });
-  }
+  // Liq
+  const lr = mkt ? mkt.adv / (sz + 0.001) : 999;
+  if (lr < CFG.minLiqRatio) { ch.push({ n: "Liq", s: "blocked", d: lr.toFixed(1) }); ok = false; } else ch.push({ n: "Liq", s: "pass", d: lr.toFixed(1) });
+  // Quality
+  if ((rec.aq || 0) < CFG.minSigQuality) { ch.push({ n: "Qual", s: "blocked", d: "" + rec.aq }); ok = false; } else ch.push({ n: "Qual", s: "pass", d: "" + rec.aq });
+  // Quarantine
+  if (snap.quarantined[rec.cid]) { ch.push({ n: "MktVal", s: "blocked", d: snap.quarantined[rec.cid].join(",") }); ok = false; }
+  else ch.push({ n: "MktVal", s: "pass", d: "valid" });
 
-  // ─── Check 7: Signal quality ───
-  if ((rec.aq || 0) < CFG.minSigQuality) {
-    checks.push({ n: "Qual", s: "blocked", d: "" + rec.aq });
-    approved = false;
-  } else {
-    checks.push({ n: "Qual", s: "pass", d: "" + rec.aq });
-  }
-
-  // ─── Check 8: Market quarantine (invalid data) ───
-  if (snap.quarantined[rec.cid]) {
-    checks.push({ n: "MktVal", s: "blocked", d: snap.quarantined[rec.cid].join(",") });
-    approved = false;
-  } else {
-    checks.push({ n: "MktVal", s: "pass", d: "valid" });
-  }
-
-  return { ok: approved && allowedQty >= 15, sz: allowedQty, ch: checks };
+  return { ok: ok && sz >= 15, sz, ch };
 }
 
 // ══════════════════════ ENGINE: EXECUTION [P1] ═══════════════════════
@@ -759,24 +629,20 @@ function computeMetrics(positions, markets, eqCurve, peakEq) {
 }
 
 // ══════════════════════ ENGINE: META-ALPHA ATTRIBUTION [A2][A4] ═════
-// Pure function: processes fill-level attribution events into metaPerf.
-// Deterministic: same attrEvents always produce same metaPerf updates.
+// [A2] Pure function: processes fill-level attribution events into metaPerf
+// [A4] Deterministic: same attrEvents always produce same metaPerf updates
 // Only learns from realized PnL. Never from unrealized PnL or fill-quality proxies.
-// [C6] Defensive against malformed attr: arrays, nulls, non-finite numbers.
 function applyAttributionEvents(metaPerf, attrEvents) {
   if (!attrEvents || attrEvents.length === 0) return metaPerf;
   const result = { nlp: [...metaPerf.nlp], momentum: [...metaPerf.momentum], arb: [...metaPerf.arb] };
   for (const evt of attrEvents) {
-    if (!evt || typeof evt.rpnl !== "number" || !Number.isFinite(evt.rpnl)) continue;
     if (Math.abs(evt.rpnl) < 0.0001) continue;
     const attr = evt.attr;
-    // Reject null, arrays, and non-objects — attr must be a plain object {src:pct}
-    if (!attr || typeof attr !== "object" || Array.isArray(attr)) continue;
+    if (!attr || typeof attr !== "object") continue;
     for (const [src, pct] of Object.entries(attr)) {
       const buf = result[src];
       if (!buf) continue;
-      if (typeof pct !== "number" || !Number.isFinite(pct)) continue;
-      // Proportional attribution: source gets its percentage of the fill's rPnL
+      // [A3] Proportional attribution: source gets its percentage of the fill's rPnL
       buf.push(+(evt.rpnl * pct / 100).toFixed(6));
       if (buf.length > 50) buf.shift();
     }
@@ -938,81 +804,22 @@ function updateCB(cb, metrics, time) {
   return next;
 }
 
-// ══════════════════════ ENGINE: PRUNING [C4] ════════════════════════
-// Collect order IDs that must NOT be pruned from history:
-//   - all active (non-terminal) orders
-//   - both ends of every replacedBy link
-//   - parent + child of every parentOrderId link
-//   - transitive closure over both relations (lineage chains)
-function collectProtectedOrderIds(activeOrders, historyOrders) {
-  const protectedIds = new Set();
-  const allOrders = [...activeOrders, ...historyOrders];
-
-  // Seed: non-terminal active orders
-  for (const o of activeOrders) {
-    if (!TERMINAL.has(o.status)) protectedIds.add(o.id);
-  }
-  // Seed: direct lineage links
-  for (const o of allOrders) {
-    if (o.replacedBy) {
-      protectedIds.add(o.id);
-      protectedIds.add(o.replacedBy);
-    }
-    if (o.parentOrderId) {
-      protectedIds.add(o.id);
-      protectedIds.add(o.parentOrderId);
-    }
-  }
-
-  // Transitive closure: extend protection through chains.
-  // Guard against infinite loops with a hard cap.
-  for (let iter = 0; iter < 50; iter++) {
-    let changed = false;
-    for (const o of allOrders) {
-      if (protectedIds.has(o.id)) {
-        if (o.parentOrderId && !protectedIds.has(o.parentOrderId)) {
-          protectedIds.add(o.parentOrderId);
-          changed = true;
-        }
-        if (o.replacedBy && !protectedIds.has(o.replacedBy)) {
-          protectedIds.add(o.replacedBy);
-          changed = true;
-        }
-      }
-      if (o.parentOrderId && protectedIds.has(o.parentOrderId) && !protectedIds.has(o.id)) {
-        protectedIds.add(o.id);
-        changed = true;
-      }
-    }
-    if (!changed) break;
-  }
-
-  return protectedIds;
+// ══════════════════════ ENGINE: PRUNING ══════════════════════════════
+function collectProtectedIds(activeOrders, historyOrders) {
+  const p = new Set(); const all = [...activeOrders, ...historyOrders];
+  for (const o of all) { if (o.parentOrderId) p.add(o.parentOrderId); if (o.replacedBy) { p.add(o.id); p.add(o.replacedBy); } if (!TERMINAL.has(o.status)) p.add(o.id); }
+  // [P7] Transitive closure: protect full replacement/unwind chains
+  let changed = true; while (changed) { changed = false; for (const o of all) { if (p.has(o.id) && o.parentOrderId && !p.has(o.parentOrderId)) { p.add(o.parentOrderId); changed = true; } if (p.has(o.parentOrderId) && !p.has(o.id)) { p.add(o.id); changed = true; } } }
+  return p;
 }
-
-// Prune terminal history while preserving protected lineage.
-// Always returns a flat array. Never mutates input.
 function pruneOrderHistory(orderHistory, activeOrders) {
-  if (!Array.isArray(orderHistory)) return [];
-  if (orderHistory.length <= CFG.historyRetentionCap) return [...orderHistory];
-
-  const protectedIds = collectProtectedOrderIds(activeOrders, orderHistory);
-  const protectedOrders = [];
-  const prunable = [];
-  for (const o of orderHistory) {
-    if (protectedIds.has(o.id)) protectedOrders.push(o);
-    else prunable.push(o);
-  }
-
-  // Budget for prunable retention:
-  //   - at minimum: historyMinRetainTerminal (so we always keep a tail)
-  //   - at most:    remaining slots after protected
-  const remainingSlots = Math.max(0, CFG.historyRetentionCap - protectedOrders.length);
-  const minRetain = Math.min(CFG.historyMinRetainTerminal, prunable.length);
-  const budget = Math.max(minRetain, remainingSlots);
-  const keepPrunable = budget > 0 ? prunable.slice(-Math.min(budget, prunable.length)) : [];
-
-  return [...protectedOrders, ...keepPrunable];
+  if (orderHistory.length <= CFG.historyRetentionCap) return orderHistory;
+  const p = collectProtectedIds(activeOrders, orderHistory);
+  const keep = [], pruneable = [];
+  for (const o of orderHistory) { if (p.has(o.id)) keep.push(o); else pruneable.push(o); }
+  // [P7] Retain at least historyMinRetainTerminal terminal orders
+  const retainCount = Math.max(CFG.historyMinRetainTerminal, CFG.historyRetentionCap - keep.length);
+  return [...keep, ...pruneable.slice(-Math.max(0, Math.min(retainCount, pruneable.length)))];
 }
 
 // ══════════════════════ ENGINE: CB EVENT TRACKING [P5] ══════════════
@@ -1079,19 +886,7 @@ function tick(prev, tickTime) {
   const ms2 = momSigs(s.markets, s.histories, time); sigs = sigs.filter(x => x.source !== "momentum"); sigs.push(...ms2); s.monitor = { ...s.monitor, signalCounts: { ...s.monitor.signalCounts, momentum: s.monitor.signalCounts.momentum + ms2.length } };
   if (rng() < 0.35) { const as2 = arbSigs(s.markets, s.histories, time); sigs = sigs.filter(x => x.source !== "arb"); sigs.push(...as2); s.monitor = { ...s.monitor, signalCounts: { ...s.monitor.signalCounts, arb: s.monitor.signalCounts.arb + as2.length } }; }
   // 8. Process
-  // 8. Process signals into recommendations
-  // [C3] Pass live state so sizing uses current equity, DD, exposure, positions, CB state.
-  const liveStateForSizing = {
-    equity: s.equity,
-    currentDD: s.currentDD,
-    grossExposure: s.grossExposure,
-    positions: s.positions,
-    markets: s.markets,
-    cbState: cb.state,
-  };
-  const { filtered, recs } = processSigs(sigs, s.alphaWeights, s.regime.confidence, time, liveStateForSizing);
-  s.signals = filtered.slice(0, 80);
-  s.recommendations = [...recs, ...s.recommendations].slice(0, 40);
+  const { filtered, recs } = processSigs(sigs, s.alphaWeights, s.regime.confidence, time); s.signals = filtered.slice(0, 80); s.recommendations = [...recs, ...s.recommendations].slice(0, 40);
   // 9-11. Orders
   let positions = {}; for (const [k, v] of Object.entries(s.positions)) positions[k] = { ...v };
   let fills = [...s.fills], fillKeys = { ...s.fillKeys };
@@ -1111,24 +906,12 @@ function tick(prev, tickTime) {
     if (childSlipRejects > 0) { for (let i = 0; i < childSlipRejects; i++) cb = recordSlipEvent(cb, CFG.maxSlipBps + 1, time); }
     if (advanced.slipBps != null) cb = recordSlipEvent(cb, advanced.slipBps, time);
     if (advanced.status === "REJECTED") cb = recordReject(cb, "order_reject", advanced.id, s.events, time);
-    // Poor fill: only record when all children are done, order has low fill rate, and size was meaningful
+    // [P7] FIX: Only record poor fill when all children are evaluated (no pending)
     const pendingChildren = advanced.children.filter(c => c.st === "NEW" || c.st === "ACCEPTED");
-    const allChildrenDone = pendingChildren.length === 0;
-    const fillRateLow = advanced.fillRate < 0.3 && advanced.parentSz > 50;
-    if (allChildrenDone && fillRateLow) {
+    if (pendingChildren.length === 0 && advanced.fillRate < 0.3 && advanced.parentSz > 50 && !TERMINAL.has(advanced.status) || (TERMINAL.has(advanced.status) && advanced.fillRate < 0.3 && advanced.parentSz > 50)) {
       cb = recordPoorFill(cb, time);
     }
-    // [C2] Half-open probe accounting: use REAL fill notional (qty × price),
-    // not totalFilled which is quantity. Count each new fill as a probe data point.
-    if (cb.state === "half_open" && nf.length > 0) {
-      let probeFillNotional = 0;
-      for (const f of nf) probeFillNotional += f.qty * f.px;
-      cb = {
-        ...cb,
-        halfOpenNotional: cb.halfOpenNotional + probeFillNotional,
-        halfOpenFills: (cb.halfOpenFills || 0) + nf.length,
-      };
-    }
+    if (cb.state === "half_open" && advanced.totalFilled > 0) { cb = { ...cb, halfOpenNotional: cb.halfOpenNotional + advanced.totalFilled, halfOpenFills: (cb.halfOpenFills || 0) + 1 }; }
     // [P2] Pass seqRef for deterministic replacement/unwind IDs
     const { order: resolved, spawned } = resolvePartialFill(advanced, s.markets, time, rng, seqRef);
     if (resolved.partialAction) s.events.push({ evt: "partial:" + resolved.partialAction.action.toLowerCase(), ts: time, s: resolved.cid + "|" + resolved.partialAction.reason });
@@ -1279,16 +1062,14 @@ function runTests() {
     assert("lifecycle:NEW->FILLED path exists", ord.totalFilled > 0);
   }
 
-  // Test 2: NEW -> ACCEPTED -> REJECTED (all children rejected on slip)
+  // Test 2: NEW -> ACCEPTED -> REJECTED (all children rejected)
   {
-    const ord = { id: "t2", time: 0, cid: "btc150k", side: "YES", dir: "BUY_YES", parentSz: 10, lim: 0.05, strat: "aggressive", children: [{ id: "t2_c0_g0", sz: 10, lim: 0.05, fp: null, st: "NEW" }], status: "NEW", totalFilled: 0, avgFP: null, ce: 0.01, attr: {}, riskCh: [], urg: "immediate", fillRate: 0, slipBps: null, partialAction: null, retryBudget: 0, retryGen: 0, replacedBy: null, parentOrderId: null };
-    // Low-price market so a small absolute price offset → huge bps → slip reject
-    const mkts = { btc150k: { id: "btc150k", yes: 0.05, cat: "crypto", adv: 12000 } };
-    // Alternate rng: 1st call (fill gate) passes, 2nd call (price offset) yields max deviation
-    let callCount = 0;
-    const slipRng = () => (++callCount % 2 === 1 ? 0.5 : 0.99);
-    const r = advanceOrderFills(ord, slipRng, mkts, 1000, {});
-    assert("lifecycle:NEW->REJECTED on slip", r.order.children[0].st === "REJECTED");
+    const ord = { id: "t2", time: 0, cid: "btc150k", side: "YES", dir: "BUY_YES", parentSz: 10, lim: 0.01, strat: "aggressive", children: [{ id: "t2_c0_g0", sz: 10, lim: 0.01, fp: null, st: "NEW" }], status: "NEW", totalFilled: 0, avgFP: null, ce: 0.01, attr: {}, riskCh: [], urg: "immediate", fillRate: 0, slipBps: null, partialAction: null, retryBudget: 0, retryGen: 0, replacedBy: null, parentOrderId: null };
+    const mkts = { btc150k: { id: "btc150k", yes: 0.99, cat: "crypto", adv: 12000 } };
+    // Force fill with extreme slippage
+    const highSlipRng = () => 0.99;
+    const r = advanceOrderFills(ord, highSlipRng, mkts, 1000, {});
+    assert("lifecycle:NEW->REJECTED on slip", r.order.status === "REJECTED" || r.order.children[0].st === "REJECTED");
   }
 
   // Test 3: PARTIALLY_FILLED -> REPLACED with new order
@@ -1358,14 +1139,13 @@ function runTests() {
   // Test 8: Position rebuild from fills
   {
     const fills = [
-      { key: "f1", orderId: "o1", cid: "btc150k", side: "YES", qty: 100, px: 0.40, time: 1000, slipBps: 1 },
-      { key: "f2", orderId: "o2", cid: "btc150k", side: "NO", qty: 50, px: 0.45, time: 2000, slipBps: 2 },
+      { key: "f1", orderId: "o1", cid: "btc150k", side: "YES", qty: 100, px: 0.45, time: 1000, slipBps: 1 },
+      { key: "f2", orderId: "o2", cid: "btc150k", side: "NO", qty: 50, px: 0.55, time: 2000, slipBps: 2 },
     ];
     const rebuilt = rebuildPositionsFromFills(fills);
     assert("rebuild:yes qty correct", rebuilt.btc150k.yesQty === 50);
     assert("rebuild:no qty zero after offset", rebuilt.btc150k.noQty === 0);
-    // 50 YES bought @ 0.40, closed via NO @ 0.45 → closing price (1-0.45)=0.55; rPnL = 50*(0.55-0.40) = 7.5
-    assert("rebuild:realized pnl computed", Math.abs(rebuilt.btc150k.realizedPnl - 7.5) < 0.01);
+    assert("rebuild:realized pnl computed", Math.abs(rebuilt.btc150k.realizedPnl) > 0);
   }
 
   // Test 9: Realized PnL rebuild from fills
@@ -1385,16 +1165,13 @@ function runTests() {
     const orders = [{ id: "oc1", status: "FILLED", parentSz: 100, totalFilled: 100, cid: "btc150k", children: [], replacedBy: null, parentOrderId: null }];
     const fills = [{ key: "ocf1", orderId: "oc1", cid: "btc150k", side: "YES", qty: 100, px: 0.5, time: 1000, slipBps: 1 }];
     const fk = { ocf1: true };
-    // Positions must match the fills (otherwise recon correctly flags drift)
-    const positions = rebuildPositionsFromFills(fills);
-    const r = reconcile(positions, fills, fk, [], orders);
+    const r = reconcile({}, fills, fk, [], orders);
     assert("recon:consistent state ok", r.ok);
 
     // Now test inconsistent: FILLED but wrong qty
     const badOrders = [{ id: "oc2", status: "FILLED", parentSz: 100, totalFilled: 50, cid: "btc150k", children: [], replacedBy: null, parentOrderId: null }];
     const badFills = [{ key: "ocf2", orderId: "oc2", cid: "btc150k", side: "YES", qty: 50, px: 0.5, time: 1000, slipBps: 1 }];
-    const badPositions = rebuildPositionsFromFills(badFills);
-    const r2 = reconcile(badPositions, badFills, { ocf2: true }, [], badOrders);
+    const r2 = reconcile({}, badFills, { ocf2: true }, [], badOrders);
     assert("recon:filled qty mismatch detected", !r2.ok && r2.issues.some(i => i.type === "filled_qty_mismatch"));
   }
 
@@ -1654,233 +1431,6 @@ function runTests() {
     assert("attr:positions still correct", r2.positions.btc150k.yesQty === 0);
   }
 
-  // --- V4.3.2 CORRECTNESS + CLARITY PATCHES ---
-
-  // Test 33: Half-open CB cap is NOTIONAL, not qty (C1)
-  {
-    const snap = {
-      positions: {},
-      markets: { btc150k: { id: "btc150k", yes: 0.5, cat: "crypto", adv: 12000 } },
-      cb: { state: "half_open", reason: null },
-      currentDD: 0,
-      grossExposure: 0,
-      quarantined: {},
-    };
-    // sidePrice=0.5, cbHalfOpenMaxNotional=200 → max qty = 400
-    const rec = { cid: "btc150k", dir: "BUY_YES", sz: 2000, aq: 0.5 };
-    const v = preTradeRisk(rec, snap);
-    assert("half_open_cap:qty reflects notional/price", v.sz <= Math.floor(CFG.cbHalfOpenMaxNotional / 0.5));
-    assert("half_open_cap:qty is 400 at 0.5 price", v.sz === 400 || v.sz < 400);
-    // Actual notional should be <= cap
-    assert("half_open_cap:resulting notional within cap", (v.sz * 0.5) <= CFG.cbHalfOpenMaxNotional);
-  }
-
-  // Test 34: Half-open cap scales with side price (C1)
-  {
-    const snap = {
-      positions: {},
-      markets: { btc150k: { id: "btc150k", yes: 0.2, cat: "crypto", adv: 12000 } },
-      cb: { state: "half_open", reason: null },
-      currentDD: 0,
-      grossExposure: 0,
-      quarantined: {},
-    };
-    // BUY_YES at 0.2 → sidePrice=0.2, max qty = 200/0.2 = 1000
-    const rec = { cid: "btc150k", dir: "BUY_YES", sz: 5000, aq: 0.5 };
-    const v = preTradeRisk(rec, snap);
-    assert("half_open_cap:low price allows more qty", v.sz >= 500);
-    assert("half_open_cap:notional still capped", (v.sz * 0.2) <= CFG.cbHalfOpenMaxNotional);
-  }
-
-  // Test 35: Sizing uses live equity, not initialEquity (C3)
-  {
-    // Strong, fresh signal so Kelly yields positive sizing at a reasonable px
-    const signals = [
-      { id: "s1", source: "nlp", time: 100000, cid: "btc150k", dir: "BUY_YES", edge: 0.5, conf: 0.9, px: 0.7, fv: 0.85, hl: 300000, exp: 2000000, qs: 0.6 },
-    ];
-    const weights = { nlp: 1.0, momentum: 0, arb: 0 };
-    const mkt = { btc150k: { id: "btc150k", yes: 0.7, cat: "crypto", adv: 12000 } };
-    const liveLow = { equity: 5000, currentDD: 0, grossExposure: 0, positions: {}, markets: mkt, cbState: "closed" };
-    const liveHigh = { equity: 15000, currentDD: 0, grossExposure: 0, positions: {}, markets: mkt, cbState: "closed" };
-    const rLow = processSigs(signals, weights, 0.5, 150000, liveLow);
-    const rHigh = processSigs(signals, weights, 0.5, 150000, liveHigh);
-    assert("sizing:low equity produces rec", rLow.recs.length === 1);
-    assert("sizing:high equity produces rec", rHigh.recs.length === 1);
-    assert("sizing:lower equity → smaller size", rLow.recs[0].sz < rHigh.recs[0].sz);
-    // Roughly 3x equity → roughly 3x size (ignoring floor rounding)
-    assert("sizing:scale roughly proportional", rHigh.recs[0].sz / rLow.recs[0].sz >= 2.5);
-  }
-
-  // Test 36: Sizing respects drawdown scale (C3)
-  {
-    const signals = [
-      { id: "s1", source: "nlp", time: 100000, cid: "btc150k", dir: "BUY_YES", edge: 0.5, conf: 0.9, px: 0.7, fv: 0.85, hl: 300000, exp: 2000000, qs: 0.6 },
-    ];
-    const weights = { nlp: 1.0, momentum: 0, arb: 0 };
-    const mkt = { btc150k: { id: "btc150k", yes: 0.7, cat: "crypto", adv: 12000 } };
-    const liveNoDD = { equity: 10000, currentDD: 0, grossExposure: 0, positions: {}, markets: mkt, cbState: "closed" };
-    const liveMaxDD = { equity: 10000, currentDD: CFG.maxDD + 0.01, grossExposure: 0, positions: {}, markets: mkt, cbState: "closed" };
-    const rNo = processSigs(signals, weights, 0.5, 150000, liveNoDD);
-    const rMax = processSigs(signals, weights, 0.5, 150000, liveMaxDD);
-    assert("sizing:no DD produces rec", rNo.recs.length === 1);
-    // At max DD, DD scale = 0 → capital = 0 → desiredQty = 0 → rec below min size → skipped
-    assert("sizing:max DD produces no recs", rMax.recs.length === 0);
-  }
-
-  // Test 37: Sizing respects remaining gross notional room (C3)
-  {
-    const signals = [
-      { id: "s1", source: "nlp", time: 100000, cid: "btc150k", dir: "BUY_YES", edge: 0.5, conf: 0.9, px: 0.7, fv: 0.85, hl: 300000, exp: 2000000, qs: 0.6 },
-    ];
-    const weights = { nlp: 1.0, momentum: 0, arb: 0 };
-    const mkt = { btc150k: { id: "btc150k", yes: 0.7, cat: "crypto", adv: 12000 } };
-    // 70 notional room remaining → at price 0.7 → max 100 qty
-    const liveTight = { equity: 10000, currentDD: 0, grossExposure: CFG.maxExpNotional - 70, positions: {}, markets: mkt, cbState: "closed" };
-    const r = processSigs(signals, weights, 0.5, 150000, liveTight);
-    assert("sizing:notional-constrained rec exists", r.recs.length === 1);
-    // allowed_qty * 0.7 must be <= 70
-    assert("sizing:notional cap respected", r.recs[0].sz * 0.7 <= 70.01);
-  }
-
-  // Test 38: Pruning returns flat array always (C4)
-  {
-    const emptyResult = pruneOrderHistory([], []);
-    assert("prune:empty input returns array", Array.isArray(emptyResult) && emptyResult.length === 0);
-
-    const smallHistory = [{ id: "h1", status: "FILLED", parentOrderId: null, replacedBy: null }];
-    const smallResult = pruneOrderHistory(smallHistory, []);
-    assert("prune:below cap returns array", Array.isArray(smallResult) && smallResult.length === 1);
-
-    // Over cap
-    const bigHistory = [];
-    for (let i = 0; i < 500; i++) bigHistory.push({ id: "h" + i, status: "FILLED", parentOrderId: null, replacedBy: null });
-    const bigResult = pruneOrderHistory(bigHistory, []);
-    assert("prune:over cap returns flat array", Array.isArray(bigResult));
-    assert("prune:over cap respects retentionCap", bigResult.length <= CFG.historyRetentionCap + CFG.historyMinRetainTerminal);
-    // Each entry should be an order object, not a nested array
-    assert("prune:entries are order objects", bigResult.every(o => o && typeof o === "object" && "id" in o && !Array.isArray(o)));
-  }
-
-  // Test 39: Pruning preserves full lineage chain (C4)
-  {
-    // Create a chain: parent → replaced by child → whose child is further replaced
-    const active = [{ id: "live", status: "ACCEPTED", parentOrderId: "mid", replacedBy: null }];
-    const history = [];
-    for (let i = 0; i < 400; i++) history.push({ id: "junk" + i, status: "FILLED", parentOrderId: null, replacedBy: null });
-    // Lineage chain buried in history
-    history.push({ id: "root", status: "REPLACED", parentOrderId: null, replacedBy: "mid" });
-    history.push({ id: "mid", status: "REPLACED", parentOrderId: "root", replacedBy: "live" });
-
-    const pruned = pruneOrderHistory(history, active);
-    const ids = new Set(pruned.map(o => o.id));
-    assert("prune:lineage root retained", ids.has("root"));
-    assert("prune:lineage mid retained", ids.has("mid"));
-  }
-
-  // Test 40: Terminal order cannot re-enter execution (FSM safety)
-  {
-    const rng = createRng(100);
-    const terminalOrder = {
-      id: "term1", time: 0, cid: "btc150k", side: "YES", dir: "BUY_YES",
-      parentSz: 50, lim: 0.5, strat: "aggressive",
-      children: buildChildren("term1", 50, 0.5, "aggressive", 0),
-      status: "FILLED", totalFilled: 50, avgFP: 0.5, ce: 0.01,
-      attr: {}, riskCh: [], urg: "immediate", fillRate: 1.0,
-      slipBps: null, partialAction: null, retryBudget: 2, retryGen: 0,
-      replacedBy: null, parentOrderId: null,
-    };
-    const mkts = { btc150k: { id: "btc150k", yes: 0.5, cat: "crypto", adv: 12000 } };
-    const r = advanceOrderFills(terminalOrder, rng, mkts, 2000, {});
-    assert("fsm:terminal order unchanged", r.order.status === "FILLED");
-    assert("fsm:terminal order no new fills", r.newFills.length === 0);
-    assert("fsm:terminal order no slip rejects", r.childSlipRejects === 0);
-
-    // Also test REPLACED, CANCELLED, REJECTED
-    for (const st of ["REPLACED", "CANCELLED", "REJECTED"]) {
-      const o = { ...terminalOrder, status: st };
-      const r2 = advanceOrderFills(o, createRng(100), mkts, 2000, {});
-      assert("fsm:" + st + " immutable", r2.order.status === st && r2.newFills.length === 0);
-    }
-  }
-
-  // Test 41: Half-open → closed requires real probe success (CB accounting)
-  {
-    // Scenario A: half_open with 0 fills → should NOT recover
-    const cb1 = {
-      state: "half_open", failCount: 1, lastFailTime: 1000, reason: "test",
-      triggers: [], recentSlipEvents: [], recentRejects: [], recentPoorFills: [],
-      recentInvalidData: [], halfOpenNotional: 0, halfOpenFills: 0,
-    };
-    const r1 = updateCB(cb1, { currentDD: 0, grossExposure: 0 }, 5000);
-    assert("cb:half_open stays open without probe fills", r1.state === "half_open");
-
-    // Scenario B: half_open with required probe fills and 0 rejects → recover
-    const cb2 = {
-      state: "half_open", failCount: 1, lastFailTime: 1000, reason: "test",
-      triggers: [], recentSlipEvents: [], recentRejects: [], recentPoorFills: [],
-      recentInvalidData: [], halfOpenNotional: 100, halfOpenFills: CFG.cbHalfOpenProbeMinFills,
-    };
-    const r2 = updateCB(cb2, { currentDD: 0, grossExposure: 0 }, 5000);
-    assert("cb:half_open → closed on probe success", r2.state === "closed");
-
-    // Scenario C: half_open with probe fills BUT a recent reject → do NOT recover
-    const cb3 = {
-      state: "half_open", failCount: 1, lastFailTime: 1000, reason: "test",
-      triggers: [], recentSlipEvents: [], recentRejects: [{ time: 1500, type: "test", orderId: "o1" }],
-      recentPoorFills: [], recentInvalidData: [], halfOpenNotional: 100, halfOpenFills: CFG.cbHalfOpenProbeMinFills,
-    };
-    const r3 = updateCB(cb3, { currentDD: 0, grossExposure: 0 }, 5000);
-    assert("cb:half_open blocked by recent reject", r3.state === "half_open");
-  }
-
-  // Test 42: Duplicate fills strictly idempotent (attribution + position)
-  {
-    const f1 = { key: "idem_open", orderId: "o1", cid: "btc150k", side: "YES", qty: 100, px: 0.40, time: 1000, slipBps: 1, attr: { nlp: 100 } };
-    const r1 = applyFills({}, [], {}, [f1]);
-    // Apply same fill 5 times
-    const r2 = applyFills(r1.positions, r1.fills, r1.fillKeys, [f1, f1, f1, f1, f1]);
-    assert("idem:position unchanged after duplicate", r2.positions.btc150k.yesQty === 100);
-    assert("idem:fills ledger size unchanged", r2.fills.length === 1);
-    assert("idem:fillKeys unchanged", Object.keys(r2.fillKeys).length === 1);
-    assert("idem:no attribution events", r2.attrEvents.length === 0);
-  }
-
-  // Test 43: Attribution only on closing quantity, not opening remainder (A3/C6)
-  {
-    // Open 50 YES, then cross-fill 80 NO (closes 50, opens 30)
-    const f1 = { key: "cross_open", orderId: "o1", cid: "fedcut", side: "YES", qty: 50, px: 0.45, time: 1000, slipBps: 1, attr: { nlp: 100 } };
-    const r1 = applyFills({}, [], {}, [f1]);
-    const f2 = { key: "cross_close", orderId: "o2", cid: "fedcut", side: "NO", qty: 80, px: 0.60, time: 2000, slipBps: 1, attr: { arb: 100 } };
-    const r2 = applyFills(r1.positions, r1.fills, r1.fillKeys, [f2]);
-
-    assert("close_only:exactly 1 attr event", r2.attrEvents.length === 1);
-    // rPnL = 50 * ((1 - 0.60) - 0.45) = 50 * -0.05 = -2.5
-    assert("close_only:rpnl on 50 closing qty only", Math.abs(r2.attrEvents[0].rpnl - (-2.5)) < 0.01);
-    // Remaining 30 NO opens new position (no rPnL)
-    assert("close_only:yesQty closed", r2.positions.fedcut.yesQty === 0);
-    assert("close_only:noQty opened remainder", r2.positions.fedcut.noQty === 30);
-  }
-
-  // Test 44: Malformed attr does not crash (C6)
-  {
-    const mp = { nlp: [], momentum: [], arb: [] };
-    const events = [
-      { rpnl: 5.0, attr: null },                    // null attr
-      { rpnl: 3.0, attr: [] },                      // array attr (invalid)
-      { rpnl: 2.0, attr: { nlp: "bad" } },          // non-numeric pct
-      { rpnl: 1.0, attr: { nlp: NaN } },            // NaN pct
-      { rpnl: NaN, attr: { nlp: 50 } },             // NaN rpnl
-      { rpnl: Infinity, attr: { nlp: 50 } },        // non-finite rpnl
-      { rpnl: 10.0, attr: { nlp: 50, momentum: 50 } }, // valid
-    ];
-    const r = applyAttributionEvents(mp, events);
-    // Only the last event should produce attribution
-    assert("malformed:nlp got exactly 1 update", r.nlp.length === 1);
-    assert("malformed:momentum got exactly 1 update", r.momentum.length === 1);
-    assert("malformed:arb untouched", r.arb.length === 0);
-    assert("malformed:nlp value = 10 * 0.5", Math.abs(r.nlp[0] - 5.0) < 0.01);
-  }
-
   return results;
 }
 
@@ -1901,7 +1451,7 @@ function St({ l, v, c = K.tx, s }) { return <div style={mc2}><div style={{ fontS
 function RB({ s }) { const m = { pass: { c: K.g, b: K.gd }, adjusted: { c: K.y, b: K.yd }, blocked: { c: K.r, b: K.rd } }; const x = m[s] || m.pass; return <span style={bx(x.c, x.b)}>{(s || "").toUpperCase()}</span>; }
 const TABS = ["Dashboard", "Regime", "Alpha", "Execution", "Risk", "System", "Tests"];
 
-export default function V432() {
+export default function V431() {
   const [state, setState] = useState(() => initState(42));
   const [running, setRunning] = useState(false);
   const [tab, setTab] = useState("Dashboard");
@@ -1914,9 +1464,9 @@ export default function V432() {
       {/* HEADER */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <div style={{ width: 32, height: 32, borderRadius: 8, background: "linear-gradient(135deg," + K.g + "," + K.c + ")", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, fontWeight: 900, color: K.bg, fontFamily: FF }}>4.3.2</div>
-          <div><div style={{ fontSize: 14, fontWeight: 700 }}>Polymarket V4.3.2</div>
-            <div style={{ fontSize: 8, color: K.dm, fontFamily: FF }}>LIVE-STATE SIZING · HALF-OPEN NOTIONAL · CLEAN PRUNING · CLEARER RISK</div></div>
+          <div style={{ width: 32, height: 32, borderRadius: 8, background: "linear-gradient(135deg," + K.g + "," + K.c + ")", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, fontWeight: 900, color: K.bg, fontFamily: FF }}>4.3.1</div>
+          <div><div style={{ fontSize: 14, fontWeight: 700 }}>Polymarket V4.3.1</div>
+            <div style={{ fontSize: 8, color: K.dm, fontFamily: FF }}>FILL-LEVEL ATTR · LINEAGE PNL · PARTIAL CLOSE · DETERMINISTIC LEARNING</div></div>
         </div>
         <div style={{ display: "flex", gap: 5, alignItems: "center" }}>
           <span style={bx(st.regime.trend === "trending" ? K.g : st.regime.trend === "mean_reverting" ? K.p : K.dm, st.regime.trend === "trending" ? K.gd : st.regime.trend === "mean_reverting" ? K.pd : K.s2)}>{st.regime.trend}</span>
@@ -2093,14 +1643,12 @@ export default function V432() {
           </div>)}</div>
         </div>
         <div style={{ ...cd2, fontSize: 8, fontFamily: FF, color: K.dm }}>
-          <b style={{ color: K.tx }}>V4.3.2 correctness guarantees:</b><br />
-          [C1] Half-open CB: cbHalfOpenMaxNotional ${CFG.cbHalfOpenMaxNotional} is NOTIONAL, converted to qty via side price.<br />
-          [C2] Half-open accounting: uses real fill notional (qty{"\u00D7"}price), counts actual fills not advances.<br />
-          [C3] Sizing: live equity + DD scale + remaining notional/position/category room + half-open cap. Never from initialEquity.<br />
-          [C4] Pruning: flat-array return, transitive lineage closure (parent+replacedBy chains), retention cap honored.<br />
-          [C5] Risk: requestedQty / allowedQty / sidePrice / additionalNotional — qty vs notional explicitly separated.<br />
-          [C6] Attribution: hardened against arrays, null, non-finite rpnl/pct. Still pure &amp; deterministic.<br />
-          [A1-A4, P1-P7] All prior guarantees preserved.
+          <b style={{ color: K.tx }}>V4.3.1 correctness guarantees:</b><br />
+          [A1] Fill-level lineage: each fill carries attr from originating order. Fill{"\u2192"}Order{"\u2192"}Signal chain explicit.<br />
+          [A2] Attribution: realized PnL attributed per-fill via actual lineage. No "most recent order" lookup.<br />
+          [A3] Partial close: only closing portion generates attribution event. Opening portion has no rPnL to attribute.<br />
+          [A4] Determinism: applyAttributionEvents is pure. No unrealized PnL learning. No fill-quality proxy learning.<br />
+          [P1-P7] All V4.3 guarantees preserved: FSM · partial fills · fill dedup · recon · CB · determinism · hardening.
         </div>
       </div>}
 
@@ -2126,7 +1674,7 @@ export default function V432() {
         {!testResults && <div style={{ color: K.dm, fontSize: 10 }}>Click RUN TESTS to execute the deterministic test suite.</div>}
       </div>}
 
-      <div style={{ textAlign: "center", padding: "10px 0 4px", fontSize: 7, color: K.dm, fontFamily: FF }}>V4.3.2 · SEED:{st.seed} · TICK:{st.tickCount} · SEQ:{st.orderSeq} · REALIZED:{f$(st.realizedPnl)} · UNREALIZED:{f$(st.unrealizedPnl)} · NOT FINANCIAL ADVICE</div>
+      <div style={{ textAlign: "center", padding: "10px 0 4px", fontSize: 7, color: K.dm, fontFamily: FF }}>V4.3.1 · SEED:{st.seed} · TICK:{st.tickCount} · SEQ:{st.orderSeq} · REALIZED:{f$(st.realizedPnl)} · UNREALIZED:{f$(st.unrealizedPnl)} · NOT FINANCIAL ADVICE</div>
     </div>
   );
 }

@@ -1,5 +1,25 @@
 # Changelog
 
+## [4.3.2] — Correctness + Clarity Patch
+
+### Fixed
+- **Half-open CB cap was qty, not notional**: `cbHalfOpenMaxNotional=200` was compared directly against qty. Now converted to qty via `Math.floor(notional / sidePrice)`. At price 0.20, allows 1000 shares instead of wrongly capping at 200.
+- **Half-open probe accounting used qty as notional**: `halfOpenNotional` accumulated `totalFilled` (qty) instead of `qty × price`. Now uses real fill notional.
+- **Sizing used hardcoded initialEquity**: `processSigs` now takes live state and sizes from: live equity × DD scale, clamped by remaining gross-notional room, per-market qty room, per-category qty room, and half-open CB cap.
+- **Poor-fill evaluation operator precedence bug**: `!TERMINAL || (TERMINAL && ...)` always fired for non-terminal. Replaced with clear booleans.
+- **4 test fixture bugs**: slip-rejection rng, zero-PnL prices, empty positions in recon, decayed signal edge.
+
+### Improved
+- **Risk clarity**: `preTradeRisk` rewritten with explicit names: `requestedQty`, `allowedQty`, `sidePrice`, `additionalNotional`, `remainingNotionalCapacity`. 8 numbered checks in stable sequence.
+- **Pruning clarity**: `collectProtectedOrderIds` with explicit seed + bounded transitive closure (max 50 iterations). `pruneOrderHistory` always returns flat array, defensive `Array.isArray`, respects both retention cap and min-terminal.
+- **Attribution hardening**: `applyAttributionEvents` rejects arrays, nulls, non-finite rpnl/pct.
+
+### Added
+- 12 new tests (Tests 33–44): half-open notional cap, live-equity sizing, DD scale, notional room clamping, pruning shape/lineage, terminal immutability, probe recovery, duplicate fill idempotency, closing-only attribution, malformed attr handling.
+- **115 total tests, all passing. Determinism verified.**
+
+---
+
 ## [4.3.1] — Meta-Alpha Attribution Correctness
 
 ### Fixed
