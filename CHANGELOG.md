@@ -1,5 +1,55 @@
 # Changelog
 
+## [5.0.0] — Market-Realistic Alpha-Driven Engine
+
+### Phase 1: LOB + Execution Realism
+- Real limit order book with FIFO matching engine per market
+- Queue position tracking, partial fills via depth consumption
+- No random fill probability — fills only via matching engine
+- Depth replenishment with regime-aware stress widening
+
+### Phase 2: Market Impact + Liquidity
+- Square-root impact model: sqrt(qty/ADV) × coefficient
+- Adverse selection: mid price moves against aggressive fills
+- Temporary impact decays over configurable ticks
+- Dynamic spread widening under high-vol / low-liq stress
+
+### Phase 3: Real Alpha Engine
+- Orderflow imbalance signals from LOB bid/ask depth ratio
+- Cointegration-aware stat arb with ADF-like stationarity check
+- Multi-timeframe volatility-adjusted momentum (short/mid/long)
+- NLP with latency penalty on confidence
+
+### Phase 4: Portfolio Intelligence
+- Rolling correlation matrix across all markets
+- Correlated exposure constraint in pre-trade risk
+- Volatility-targeted sizing: scale by vol-target / market-vol
+- Kelly fraction capped by regime confidence level
+
+### Phase 5: Smart Execution
+- Adaptive limit pricing from LOB state (immediate/patient/passive)
+- TWAP slice scheduling for large orders
+- Cancel/replace on excessive limit-to-mid drift
+
+### Phase 6: Event Sourcing
+- Append-only structured event log (ORDER, FILL, NEWS, SIGNAL)
+- Bounded to 2000 entries (trims to 1500)
+- Full replay from events (deterministic)
+
+### Phase 7: Performance Metrics
+- Sharpe ratio (rolling, annualized)
+- Win rate from realized attribution
+- Average slippage (bps)
+- Execution quality assessment
+- Alpha contribution per signal source
+
+### Infrastructure
+- 52 deterministic tests, all passing
+- Determinism verified: same seed + time = same output
+- All V4.3.2 guarantees preserved (FSM, attribution, CB, recon, pruning)
+
+---
+
 ## [4.3.2] — Correctness + Clarity Patch
 
 ### Fixed

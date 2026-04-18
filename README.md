@@ -57,6 +57,15 @@ Open `http://localhost:5173` and click **START**.
 
 ## Version History
 
+### V5.0 — Market-Realistic Alpha-Driven Engine
+- **Phase 1**: Real LOB with FIFO matching, no random fills
+- **Phase 2**: √(qty/ADV) impact model, adverse selection, dynamic spreads
+- **Phase 3**: Orderflow imbalance, cointegration arb, multi-TF momentum, latency-penalized NLP
+- **Phase 4**: Correlation matrix, vol-targeted sizing, regime-capped Kelly, correlated exposure check
+- **Phase 5**: Adaptive limits from LOB, TWAP scheduling, cancel/replace on drift
+- **Phase 6**: Append-only event log (ORDER/FILL/NEWS), bounded, replayable
+- **Phase 7**: Sharpe, win rate, avg slippage, exec quality, alpha contribution per source
+
 ### V4.3.2 — Correctness + Clarity Patch
 - Half-open CB cap now true NOTIONAL (converted to qty via side price)
 - Half-open probe accounting uses real fill notional (qty × price)
