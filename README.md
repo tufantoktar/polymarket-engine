@@ -57,6 +57,11 @@ Open `http://localhost:5173` and click **START**.
 
 ## Version History
 
+### V5.1 — Phase 1 Modular Refactor
+- Extracted pure/low-risk modules: config, math, prng, history, regime, market, alpha
+- Zero behavior change: 52/52 tests pass, determinism verified
+- Reserved for Phase 2: execution, risk, portfolio, reconcile, CB, event log, metrics, state+tick, UI
+
 ### V5.0 — Market-Realistic Alpha-Driven Engine
 - **Phase 1**: Real LOB with FIFO matching, no random fills
 - **Phase 2**: √(qty/ADV) impact model, adverse selection, dynamic spreads

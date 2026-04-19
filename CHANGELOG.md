@@ -1,5 +1,54 @@
 # Changelog
 
+## [5.1.0] — Phase 1 Modular Refactor
+
+### Changed
+- **Extracted pure/low-risk modules from single-file App.jsx into a module tree.**
+- No behavior change: 52/52 deterministic tests pass, determinism verified.
+- Imports only — no new logic, no signature changes.
+
+### File tree
+```
+src/
+├── App.jsx              (main — reduced, imports from modules below)
+├── config/
+│   ├── config.js        CFG
+│   ├── marketDefs.js    MDEFS, PAIRS, NEWS
+│   └── constants.js     SRC_W, SRCS
+├── engine/
+│   ├── types.js         JSDoc typedefs
+│   ├── prng.js          createRng
+│   ├── history.js       pushHist, hRoc, hSma, hStd, hVol
+│   ├── regime.js        detectRegime, computeWeights
+│   ├── market.js        createLOB, refreshLOB, matchOrderAgainstLOB,
+│   │                    computeMarketImpact, applyAdverseSelection,
+│   │                    advMkt, buildBook, validateMarket,
+│   │                    computeCorrelationMatrix, checkCorrelatedExposure
+│   └── alpha.js         genNews, nlpSigs, momSigs, arbSigs,
+│                        orderflowSigs, processSigs
+└── utils/
+    └── math.js          cl, r4
+```
+
+### Not extracted yet (reserved for Phase 2)
+- Execution (FSM, orders, fills, slippage)
+- Risk (preTradeRisk, calcExposure)
+- Portfolio (applyFills, computeMetrics, applyAttributionEvents)
+- Reconciliation
+- Circuit breaker
+- Pruning
+- Event log
+- Performance metrics
+- State + tick loop
+- React UI components
+
+### Notes
+- Uses `.js` (JSDoc typedefs) not `.ts` — keeps Vite/JSX compatibility without toolchain change.
+- Named exports throughout.
+- No new libraries, no framework change.
+
+---
+
 ## [5.0.0] — Market-Realistic Alpha-Driven Engine
 
 ### Phase 1: LOB + Execution Realism

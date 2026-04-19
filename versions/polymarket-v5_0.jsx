@@ -1,28 +1,5 @@
 import { useState, useEffect, useRef } from "react";
 
-// ──────────────────────────────────────────────────────────────────────
-// Phase 1 modules: extracted pure/low-risk helpers.
-// Everything else in this file remains untouched for Phase 2+.
-// ──────────────────────────────────────────────────────────────────────
-import { cl, r4 } from "./utils/math.js";
-import { CFG } from "./config/config.js";
-import { MDEFS, PAIRS, NEWS } from "./config/marketDefs.js";
-import { SRC_W, SRCS } from "./config/constants.js";
-import { createRng } from "./engine/prng.js";
-import { pushHist, hRoc, hSma, hStd, hVol } from "./engine/history.js";
-import { detectRegime, computeWeights } from "./engine/regime.js";
-import {
-  createLOB, refreshLOB, matchOrderAgainstLOB,
-  computeMarketImpact, applyAdverseSelection,
-  advMkt, buildBook, validateMarket,
-  computeCorrelationMatrix, checkCorrelatedExposure,
-} from "./engine/market.js";
-import {
-  genNews, nlpSigs, momSigs, arbSigs,
-  orderflowSigs, processSigs,
-} from "./engine/alpha.js";
-
-
 // ═══════════════════════════════════════════════════════════════════════
 //  POLYMARKET V5.0 — MARKET-REALISTIC ALPHA-DRIVEN TRADING ENGINE
 //
@@ -66,14 +43,319 @@ import {
 // ═══════════════════════════════════════════════════════════════════════
 
 // ══════════════════════ ENGINE: PRNG ══════════════════════════════════
+function createRng(seed) {
+  let s = seed | 0;
+  return () => { s = (s + 0x6D2B79F5) | 0; let t = Math.imul(s ^ (s >>> 15), 1 | s); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+}
+const cl = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const r4 = v => +(+v).toFixed(4);
 
+// ══════════════════════ ENGINE: CONFIG ════════════════════════════════
+const CFG = {
+  maxPos: 1500, maxCatQty: 3000, maxExpNotional: 6000,
+  maxDD: 0.20, softDD: 0.12,
+  maxSlipBps: 40, minLiqRatio: 3, minSigQuality: 0.2,
+  maxSpread: 0.06, minDepth: 30, stalenessMs: 10000,
+  cbRecoveryMs: 60000, cbHalfOpenMaxNotional: 200, cbHalfOpenProbeMinFills: 1,
+  cbSlipThreshold: 5, cbRejectThreshold: 8, cbPoorFillThreshold: 6,
+  cbInvalidDataThreshold: 4, cbExpBreachMultiplier: 1.3,
+  cbSlipWindow: 20, cbPoorFillWindow: 20, cbInvalidDataWindow: 15, cbRejectWindow: 20,
+  partialRetryBudget: 2, partialDriftThreshold: 0.02, partialMinQty: 20,
+  maxSpawnDepth: 3, maxSpawnsPerTick: 6,
+  historyRetentionCap: 300, historyMinRetainTerminal: 50,
+  initialEquity: 10000,
+  // ── Phase 1: LOB Config ──
+  lobLevels: 10,               // price levels per side
+  lobBaseDepth: 150,            // base qty per level
+  lobLatencyMs: 50,             // simulated latency (ms)
+  lobAdverseSelectionBps: 5,    // adverse price move on aggressive fills
+  // ── Phase 2: Market Impact ──
+  impactCoeff: 0.15,            // sqrt-impact coefficient
+  impactDecayTicks: 8,          // ticks for temporary impact to decay
+  stressSpreadMultiplier: 2.5,  // spread multiplier in stress regime
+  // ── Phase 4: Portfolio ──
+  maxCorrelatedExposure: 0.6,   // max portfolio-level correlated notional fraction
+  volTargetAnnual: 0.15,        // annual vol target for sizing
+  corrWindow: 40,               // rolling correlation window
+  // ── Phase 5: Smart Execution ──
+  twapSlices: 5,                // TWAP slice count
+  adaptiveLimitBps: 15,         // adaptive limit price offset (bps from mid)
+  cancelReplaceThresholdBps: 25,// cancel/replace if limit drifts beyond this
+  // ── Phase 7: Metrics ──
+  metricsWindow: 50,            // rolling window for Sharpe etc.
+};
 
+const MDEFS = [
+  { id: "btc150k", q: "BTC $150k by Dec 2026?", init: 0.42, vol: 0.02, cat: "crypto", adv: 12000 },
+  { id: "recession", q: "US recession 2026?", init: 0.28, vol: 0.015, cat: "macro", adv: 8500 },
+  { id: "trump28", q: "Trump 2028 GOP primary?", init: 0.61, vol: 0.01, cat: "politics", adv: 22000 },
+  { id: "fedcut", q: "Fed cuts by July 2026?", init: 0.55, vol: 0.018, cat: "macro", adv: 15000 },
+  { id: "aibar", q: "AI passes bar top 1%?", init: 0.73, vol: 0.012, cat: "tech", adv: 5000 },
+  { id: "starship", q: "Starship orbital?", init: 0.67, vol: 0.008, cat: "tech", adv: 7000 },
+  { id: "ethflip", q: "ETH flips BTC mcap?", init: 0.08, vol: 0.025, cat: "crypto", adv: 2000 },
+  { id: "ceasefire", q: "Ukraine ceasefire 2026?", init: 0.34, vol: 0.014, cat: "geopolitics", adv: 9500 },
+];
+const PAIRS = [
+  { a: "btc150k", b: "ethflip" }, { a: "recession", b: "fedcut" },
+  { a: "btc150k", b: "fedcut" }, { a: "recession", b: "btc150k" },
+];
+const NEWS = [
+  { h: "Fed signals policy shift", m: ["fedcut", "recession"], imp: 0.7 },
+  { h: "Bitcoin breaks key level", m: ["btc150k", "ethflip"], imp: 0.6 },
+  { h: "Polling shifts outlook", m: ["trump28"], imp: 0.5 },
+  { h: "Starship test update", m: ["starship"], imp: 0.4 },
+  { h: "Treasury yields move", m: ["fedcut", "recession", "btc150k"], imp: 0.5 },
+  { h: "AI benchmark result", m: ["aibar"], imp: 0.6 },
+  { h: "Diplomatic progress", m: ["ceasefire"], imp: 0.55 },
+  { h: "Ethereum shift", m: ["ethflip", "btc150k"], imp: 0.45 },
+];
+const SRC_W = { Reuters: 1.0, Bloomberg: 0.95, AP: 0.9, Polymarket: 0.7, "X/Twitter": 0.5 };
+const SRCS = Object.keys(SRC_W);
 
+// ═══════════════════════════════════════════════════════════════════════
+//  PHASE 1: LIMIT ORDER BOOK ENGINE
+// ═══════════════════════════════════════════════════════════════════════
+// Deterministic LOB with price-level depth, FIFO queues, and matching.
+// Each market maintains its own LOB. All operations are pure/deterministic.
+
+// Create a fresh LOB for a market. midPrice is the YES price.
+function createLOB(midPrice, adv, rng) {
+  const levels = CFG.lobLevels;
+  const liquidity = cl(adv / 15000, 0.2, 2.5);
+  // Cap halfSpread so total spread stays within maxSpread
+  const halfSpread = Math.min(0.008 / liquidity, CFG.maxSpread * 0.45);
+  const bids = [];
+  const asks = [];
+  for (let i = 0; i < levels; i++) {
+    const offset = halfSpread + i * (0.005 / liquidity);
+    const bidPx = r4(cl(midPrice - offset, 0.01, 0.99));
+    const askPx = r4(cl(midPrice + offset, 0.01, 0.99));
+    const depthBase = Math.floor(CFG.lobBaseDepth * liquidity * (1 - i * 0.08));
+    const bidDepth = Math.max(10, Math.floor(depthBase * (0.7 + rng() * 0.6)));
+    const askDepth = Math.max(10, Math.floor(depthBase * (0.7 + rng() * 0.6)));
+    bids.push({ px: bidPx, qty: bidDepth, orders: [{ id: "lob_b_" + i, qty: bidDepth, ts: 0 }] });
+    asks.push({ px: askPx, qty: askDepth, orders: [{ id: "lob_a_" + i, qty: askDepth, ts: 0 }] });
+  }
+  // Sort: bids descending, asks ascending
+  bids.sort((a, b) => b.px - a.px);
+  asks.sort((a, b) => a.px - b.px);
+  const bestBid = bids[0]?.px || midPrice - halfSpread;
+  const bestAsk = asks[0]?.px || midPrice + halfSpread;
+  return {
+    bids, asks,
+    bestBid: r4(bestBid), bestAsk: r4(bestAsk),
+    spread: r4(bestAsk - bestBid),
+    midPrice: r4((bestBid + bestAsk) / 2),
+    bidDepth: bids.reduce((s, l) => s + l.qty, 0),
+    askDepth: asks.reduce((s, l) => s + l.qty, 0),
+    lastTradePrice: midPrice,
+    tradeCount: 0,
+    volumeThisTick: 0,
+  };
+}
+
+// Refresh LOB each tick: replenish depth, adjust around new mid price.
+// Pure function — returns new LOB.
+function refreshLOB(prevLob, newMidPrice, adv, regime, rng) {
+  const liquidity = cl(adv / 15000, 0.2, 2.5);
+  // Stress: widen spread in high-vol or low-liq regimes, but cap within maxSpread
+  const stressFactor = (regime.vol === "high_vol" ? 1.5 : 1) * (regime.liq === "low_liq" ? CFG.stressSpreadMultiplier : 1);
+  const halfSpread = Math.min((0.008 / liquidity) * stressFactor, CFG.maxSpread * 0.45);
+
+  const bids = [];
+  const asks = [];
+  for (let i = 0; i < CFG.lobLevels; i++) {
+    const offset = halfSpread + i * (0.005 / liquidity) * stressFactor;
+    const bidPx = r4(cl(newMidPrice - offset, 0.01, 0.99));
+    const askPx = r4(cl(newMidPrice + offset, 0.01, 0.99));
+    // Depth replenishment: mean-revert toward base, with noise
+    const depthBase = Math.floor(CFG.lobBaseDepth * liquidity * (1 - i * 0.08) / stressFactor);
+    // Carry forward partial depth from previous LOB if price level existed
+    const prevBidLevel = prevLob.bids.find(l => Math.abs(l.px - bidPx) < 0.001);
+    const prevAskLevel = prevLob.asks.find(l => Math.abs(l.px - askPx) < 0.001);
+    const bidCarry = prevBidLevel ? Math.floor(prevBidLevel.qty * 0.7) : 0;
+    const askCarry = prevAskLevel ? Math.floor(prevAskLevel.qty * 0.7) : 0;
+    const replenish = Math.floor(depthBase * 0.3 * (0.5 + rng()));
+    const bidQty = Math.max(5, bidCarry + replenish);
+    const askQty = Math.max(5, askCarry + replenish);
+    bids.push({ px: bidPx, qty: bidQty, orders: [{ id: "lob_b_" + i, qty: bidQty, ts: 0 }] });
+    asks.push({ px: askPx, qty: askQty, orders: [{ id: "lob_a_" + i, qty: askQty, ts: 0 }] });
+  }
+  bids.sort((a, b) => b.px - a.px);
+  asks.sort((a, b) => a.px - b.px);
+  const bestBid = bids[0]?.px || newMidPrice - halfSpread;
+  const bestAsk = asks[0]?.px || newMidPrice + halfSpread;
+  return {
+    bids, asks,
+    bestBid: r4(bestBid), bestAsk: r4(bestAsk),
+    spread: r4(bestAsk - bestBid),
+    midPrice: r4((bestBid + bestAsk) / 2),
+    bidDepth: bids.reduce((s, l) => s + l.qty, 0),
+    askDepth: asks.reduce((s, l) => s + l.qty, 0),
+    lastTradePrice: prevLob.lastTradePrice,
+    tradeCount: 0,
+    volumeThisTick: 0,
+  };
+}
+
+// FIFO matching engine: execute an order against the LOB.
+// side="buy" consumes asks (lifts the offer), side="sell" consumes bids (hits the bid).
+// Returns { fills, remainingQty, updatedLob }.
 // Pure, deterministic — no randomness needed.
-// Temporary impact decays over configurable ticks.
-// Apply adverse selection: after an aggressive fill, price moves against the taker.
-//  PHASE 4: CORRELATION MATRIX (needed before alpha signals)
+function matchOrderAgainstLOB(lob, side, qty, limitPx, orderId, tickTime) {
+  const fills = [];
+  let remaining = qty;
+  const bookSide = side === "buy" ? [...lob.asks.map(l => ({ ...l, orders: [...l.orders] }))] : [...lob.bids.map(l => ({ ...l, orders: [...l.orders] }))];
 
+  for (let i = 0; i < bookSide.length && remaining > 0; i++) {
+    const level = bookSide[i];
+    // Price check: buy must not exceed limit; sell must not go below limit
+    if (side === "buy" && level.px > limitPx) break;
+    if (side === "sell" && level.px < limitPx) break;
+
+    const available = level.qty;
+    const fillQty = Math.min(remaining, available);
+    if (fillQty <= 0) continue;
+
+    fills.push({
+      px: level.px,
+      qty: fillQty,
+      levelIdx: i,
+      time: tickTime,
+    });
+
+    level.qty -= fillQty;
+    remaining -= fillQty;
+    // Remove exhausted orders from FIFO queue
+    let toConsume = fillQty;
+    while (toConsume > 0 && level.orders.length > 0) {
+      const front = level.orders[0];
+      if (front.qty <= toConsume) {
+        toConsume -= front.qty;
+        level.orders.shift();
+      } else {
+        front.qty -= toConsume;
+        toConsume = 0;
+      }
+    }
+  }
+
+  // Reconstruct LOB with consumed depth
+  const newBids = side === "sell" ? bookSide.filter(l => l.qty > 0) : lob.bids.map(l => ({ ...l }));
+  const newAsks = side === "buy" ? bookSide.filter(l => l.qty > 0) : lob.asks.map(l => ({ ...l }));
+
+  const totalFilled = qty - remaining;
+  const avgPx = totalFilled > 0 ? +(fills.reduce((s, f) => s + f.px * f.qty, 0) / totalFilled).toFixed(4) : 0;
+  const lastTrade = fills.length > 0 ? fills[fills.length - 1].px : lob.lastTradePrice;
+
+  const bestBid = newBids[0]?.px || lob.bestBid;
+  const bestAsk = newAsks[0]?.px || lob.bestAsk;
+
+  const updatedLob = {
+    ...lob,
+    bids: newBids, asks: newAsks,
+    bestBid: r4(bestBid), bestAsk: r4(bestAsk),
+    spread: r4(bestAsk - bestBid),
+    midPrice: r4((bestBid + bestAsk) / 2),
+    bidDepth: newBids.reduce((s, l) => s + l.qty, 0),
+    askDepth: newAsks.reduce((s, l) => s + l.qty, 0),
+    lastTradePrice: lastTrade,
+    tradeCount: lob.tradeCount + fills.length,
+    volumeThisTick: lob.volumeThisTick + totalFilled,
+  };
+
+  return { fills, remainingQty: remaining, totalFilled, avgPx, updatedLob };
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  PHASE 2: MARKET IMPACT MODEL
+// ═══════════════════════════════════════════════════════════════════════
+// Square-root impact: price moves proportional to sqrt(qty / ADV).
+// Temporary impact decays over configurable ticks.
+// Permanent impact shifts the fair value.
+
+function computeMarketImpact(qty, adv, side) {
+  if (qty <= 0 || adv <= 0) return { tempImpact: 0, permImpact: 0, totalImpact: 0 };
+  const participation = qty / adv;
+  const sqrtImpact = CFG.impactCoeff * Math.sqrt(participation);
+  const direction = side === "buy" ? 1 : -1;
+  const tempImpact = r4(sqrtImpact * 0.7 * direction);
+  const permImpact = r4(sqrtImpact * 0.3 * direction);
+  return { tempImpact, permImpact, totalImpact: r4(tempImpact + permImpact) };
+}
+
+// Apply adverse selection: after an aggressive fill, price moves against the taker.
+function applyAdverseSelection(fillPx, midPx, side) {
+  const adverseBps = CFG.lobAdverseSelectionBps;
+  const move = midPx * adverseBps / 10000;
+  if (side === "buy") return r4(midPx + move);  // mid moves up after buy
+  return r4(midPx - move);  // mid moves down after sell
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  PHASE 4: CORRELATION MATRIX (needed before alpha signals)
+// ═══════════════════════════════════════════════════════════════════════
+function computeCorrelationMatrix(histories, marketIds) {
+  const n = marketIds.length;
+  const matrix = {};
+  for (let i = 0; i < n; i++) {
+    for (let j = i; j < n; j++) {
+      const a = marketIds[i], b = marketIds[j];
+      if (i === j) { matrix[a + ":" + b] = 1; continue; }
+      const hA = histories[a], hB = histories[b];
+      if (!hA || !hB) { matrix[a + ":" + b] = 0; matrix[b + ":" + a] = 0; continue; }
+      const w = CFG.corrWindow;
+      const pA = hA.prices.slice(-w), pB = hB.prices.slice(-w);
+      const len = Math.min(pA.length, pB.length);
+      if (len < 10) { matrix[a + ":" + b] = 0; matrix[b + ":" + a] = 0; continue; }
+      const rA = [], rB = [];
+      for (let k = 1; k < len; k++) {
+        rA.push(pA[k] - pA[k - 1]);
+        rB.push(pB[k] - pB[k - 1]);
+      }
+      const mA = rA.reduce((s, v) => s + v, 0) / rA.length;
+      const mB = rB.reduce((s, v) => s + v, 0) / rB.length;
+      let cov = 0, vA = 0, vB = 0;
+      for (let k = 0; k < rA.length; k++) {
+        cov += (rA[k] - mA) * (rB[k] - mB);
+        vA += (rA[k] - mA) ** 2;
+        vB += (rB[k] - mB) ** 2;
+      }
+      const corr = (vA > 0 && vB > 0) ? +(cov / Math.sqrt(vA * vB)).toFixed(3) : 0;
+      matrix[a + ":" + b] = corr;
+      matrix[b + ":" + a] = corr;
+    }
+  }
+  return matrix;
+}
+
+// Max correlated exposure check for portfolio constraints
+function checkCorrelatedExposure(positions, markets, corrMatrix) {
+  const mids = Object.keys(positions);
+  let totalNotional = 0;
+  let correlatedNotional = 0;
+  for (const mid of mids) {
+    const pos = positions[mid];
+    const m = markets[mid];
+    if (!m) continue;
+    const notional = pos.yesQty * m.yes + pos.noQty * (1 - m.yes);
+    totalNotional += notional;
+  }
+  if (totalNotional <= 0) return { ratio: 0, ok: true };
+  // Pairwise correlated exposure
+  for (let i = 0; i < mids.length; i++) {
+    for (let j = i + 1; j < mids.length; j++) {
+      const corr = corrMatrix[mids[i] + ":" + mids[j]] || 0;
+      if (Math.abs(corr) > 0.5) {
+        const nA = (positions[mids[i]].yesQty + positions[mids[i]].noQty);
+        const nB = (positions[mids[j]].yesQty + positions[mids[j]].noQty);
+        correlatedNotional += Math.min(nA, nB) * Math.abs(corr);
+      }
+    }
+  }
+  const ratio = totalNotional > 0 ? +(correlatedNotional / totalNotional).toFixed(3) : 0;
+  return { ratio, ok: ratio <= CFG.maxCorrelatedExposure };
+}
 
 // ══════════════════════ ENGINE: INITIAL STATE ════════════════════════
 function initState(seed = 42) {
@@ -118,17 +400,315 @@ function initState(seed = 42) {
   };
 }
 
+// ══════════════════════ ENGINE: MARKET SIM ════════════════════════════
+// Phase 2: market sim now includes permanent impact from previous trades
+function advMkt(m, rng, time, impactDecay) {
+  const mr = 0.002 * (0.5 - m.yes);
+  const noise = (rng() - 0.5) * 2 * m.vol;
+  const shock = rng() < 0.005 ? (rng() - 0.5) * 0.08 : 0;
+  // Apply decaying temporary impact from recent large trades
+  let impactAdj = 0;
+  const decayEntry = impactDecay[m.id];
+  if (decayEntry && decayEntry.remaining > 0) {
+    impactAdj = decayEntry.tempImpact * (decayEntry.remaining / CFG.impactDecayTicks);
+  }
+  const newYes = r4(cl(m.yes + mr + noise + shock + impactAdj, 0.02, 0.98));
+  return {
+    ...m, prevYes: m.yes, yes: newYes,
+    adv: Math.max(500, Math.floor(m.adv + (rng() - 0.5) * 200)),
+    lastUpdate: time,
+  };
+}
 
+// Legacy buildBook kept for validation compatibility
+function buildBook(mid, adv, rng) {
+  const lf = cl(adv / 20000, 0.3, 2), bs = 0.015 / lf;
+  const bids = [], asks = [];
+  for (let i = 1; i <= 5; i++) {
+    bids.push({ p: r4(cl(mid - bs * i / 2, 0.01, 0.99)), sz: Math.floor((80 + rng() * 300) * lf) });
+    asks.push({ p: r4(cl(mid + bs * i / 2, 0.01, 0.99)), sz: Math.floor((80 + rng() * 300) * lf) });
+  }
+  return { bids, asks, spread: r4(asks[0].p - bids[0].p), mid, bidDepth: bids.reduce((s, b) => s + b.sz, 0), askDepth: asks.reduce((s, a) => s + a.sz, 0) };
+}
 
+function validateMarket(mkt, lob, time) {
+  const issues = [];
+  if (mkt.yes < 0 || mkt.yes > 1) issues.push("price_invalid");
+  if (lob.spread > CFG.maxSpread) issues.push("spread_" + (lob.spread * 100).toFixed(1) + "%");
+  if (lob.bidDepth < CFG.minDepth || lob.askDepth < CFG.minDepth) issues.push("depth_low");
+  if (time - mkt.lastUpdate > CFG.stalenessMs && mkt.lastUpdate > 0) issues.push("stale");
+  return { valid: issues.length === 0, issues };
+}
 
+// ══════════════════════ ENGINE: HISTORY ═══════════════════════════════
+function pushHist(h, p, sp, dp) {
+  const mx = h.maxLen;
+  const np = [...h.prices, p], ns = [...h.spreads, sp], nd = [...h.depths, dp];
+  return { ...h, prices: np.length > mx ? np.slice(-mx) : np, spreads: ns.length > mx ? ns.slice(-mx) : ns, depths: nd.length > mx ? nd.slice(-mx) : nd };
+}
+function hRoc(p, n) { return p.length < n + 1 ? 0 : p[p.length - n - 1] ? (p[p.length - 1] - p[p.length - n - 1]) / p[p.length - n - 1] : 0; }
+function hSma(p, n) { const s = p.slice(-n); return s.length ? s.reduce((a, b) => a + b, 0) / s.length : 0; }
+function hStd(p, n) { const s = p.slice(-n); if (s.length < 2) return 0; const m = s.reduce((a, b) => a + b, 0) / s.length; return Math.sqrt(s.reduce((a, b) => a + (b - m) ** 2, 0) / (s.length - 1)); }
+function hVol(p, n) { const s = p.slice(-n); if (s.length < 3) return 0; const r = []; for (let i = 1; i < s.length; i++) r.push(Math.log(s[i] / (s[i - 1] || 1))); const m = r.reduce((a, b) => a + b, 0) / r.length; return Math.sqrt(r.reduce((a, b) => a + (b - m) ** 2, 0) / (r.length - 1)); }
 
+// ══════════════════════ ENGINE: REGIME ════════════════════════════════
+function detectRegime(prices, spreads, depths) {
+  if (prices.length < 30) return { trend: "neutral", vol: "low_vol", liq: "high_liq", confidence: 0, hurst: 0.5 };
+  const p = prices.slice(-100);
+  const rets = []; for (let i = 1; i < p.length; i++) rets.push(Math.log(p[i] / (p[i - 1] || 1)));
+  if (!rets.length) return { trend: "neutral", vol: "low_vol", liq: "high_liq", confidence: 0, hurst: 0.5 };
+  const mR = rets.reduce((a, b) => a + b, 0) / rets.length;
+  let cum = 0; const dev = rets.map(r => { cum += r - mR; return cum; });
+  const R = Math.max(...dev) - Math.min(...dev);
+  const S = Math.sqrt(rets.reduce((a, b) => a + (b - mR) ** 2, 0) / (rets.length - 1)) || 0.001;
+  const hurst = +cl(Math.log((R / S) + 0.001) / Math.log(rets.length), 0.1, 0.9).toFixed(3);
+  const fV = hVol(p, 20), sV = hVol(p, Math.min(80, p.length));
+  const sp = spreads.slice(-20), dp = depths.slice(-20);
+  const aS = sp.length ? sp.reduce((a, b) => a + b, 0) / sp.length : 0.05;
+  const aD = dp.length ? dp.reduce((a, b) => a + b, 0) / dp.length : 1;
+  return { trend: hurst > 0.55 ? "trending" : hurst < 0.45 ? "mean_reverting" : "neutral", vol: (fV / (sV || 0.001)) > 1.3 ? "high_vol" : "low_vol", liq: aD / (aS + 0.001) > 500 ? "high_liq" : "low_liq", confidence: +cl(prices.length / 100, 0, 1).toFixed(2), hurst };
+}
 
+// ══════════════════════ ENGINE: META-ALPHA ═══════════════════════════
+function computeWeights(regime, metaPerf, newsInt) {
+  const bases = { trending: [0.3, 0.5, 0.2], mean_reverting: [0.2, 0.2, 0.6], neutral: [0.4, 0.3, 0.3] };
+  const w = [...(bases[regime.trend] || bases.neutral)];
+  ["nlp", "momentum", "arb"].forEach((src, i) => {
+    const p = metaPerf[src]; if (p.length >= 10) {
+      const m = p.reduce((a, b) => a + b, 0) / p.length;
+      const s = Math.sqrt(p.reduce((a, b) => a + (b - m) ** 2, 0) / (p.length - 1)) || 0.001;
+      w[i] *= Math.max(0.1, 1 + 0.3 * (m / s));
+    }
+  });
+  if (newsInt > 0.7) w[0] *= 1.5;
+  if (regime.vol === "high_vol") w[1] *= 1.3;
+  if (regime.liq === "low_liq") w[2] *= 0.5;
+  const t = w[0] + w[1] + w[2];
+  return { nlp: +(w[0] / t).toFixed(3), momentum: +(w[1] / t).toFixed(3), arb: +(w[2] / t).toFixed(3) };
+}
 
+// ═══════════════════════════════════════════════════════════════════════
+//  PHASE 3: UPGRADED ALPHA SIGNALS
+// ═══════════════════════════════════════════════════════════════════════
 
+// NLP signals: latency + confidence decay, unchanged interface
+function genNews(mkts, rng, time) {
+  const tpl = NEWS[Math.floor(rng() * NEWS.length)];
+  const rel = tpl.m.map(id => mkts[id]).filter(Boolean);
+  const avgMove = rel.reduce((s, m) => s + (m.yes - m.prevYes), 0) / (rel.length || 1);
+  const raw = cl(avgMove * 20 + (rng() - 0.5) * 0.3, -1, 1);
+  const src = SRCS[Math.floor(rng() * SRCS.length)];
+  const abs = Math.abs(raw), sw = SRC_W[src], lat = Math.floor(rng() * 5000);
+  const ic = abs > 0.55 ? "binary_catalyst" : abs > 0.2 ? "gradual_shift" : "noise";
+  return { id: "n" + time, time, source: src, headline: tpl.h, markets: tpl.m, sentiment: r4(raw), impactClass: ic, confidence: +cl((0.5 + abs * 0.4) * sw * cl(1 - lat / 10000, 0.5, 1), 0, 0.99).toFixed(3), baseImpact: tpl.imp, srcWeight: sw, latencyMs: lat };
+}
 
+function nlpSigs(nev, mkts, time) {
+  // Phase 3: lower threshold, latency-penalized confidence
+  if (nev.confidence < 0.45) return [];
+  const sigs = [];
+  const latPenalty = cl(1 - nev.latencyMs / 8000, 0.3, 1);
+  for (const mid of nev.markets) {
+    const m = mkts[mid]; if (!m) continue;
+    const e = nev.sentiment * nev.baseImpact * nev.confidence * nev.srcWeight * latPenalty * 0.04;
+    if (Math.abs(e) < 0.004) continue;
+    const adjConf = +(nev.confidence * latPenalty).toFixed(3);
+    sigs.push({ id: "nlp_" + mid + "_" + time, source: "nlp", time, cid: mid, dir: e > 0 ? "BUY_YES" : "BUY_NO",
+      edge: +Math.abs(e).toFixed(4), conf: adjConf, fv: r4(cl(m.yes + e, 0.02, 0.98)),
+      px: m.yes, hl: 180000, exp: time + 720000, qs: +(adjConf * nev.srcWeight).toFixed(3) });
+  }
+  return sigs;
+}
 
+// Phase 3: Multi-timeframe volatility-adjusted momentum
+function momSigs(mkts, hists, time, regime) {
+  const sigs = [];
+  for (const [mid, m] of Object.entries(mkts)) {
+    const h = hists[mid]; if (!h || h.prices.length < 25) continue;
+    const p = h.prices, px = m.yes;
+    // Short-term
+    const r5 = hRoc(p, 5), s10 = hSma(p, 10), v20 = hVol(p, 20);
+    // Medium-term
+    const s30 = hSma(p, 30), r15 = hRoc(p, 15);
+    // Long-term (if enough data)
+    const s50 = p.length >= 50 ? hSma(p, 50) : s30;
+
+    // Multi-timeframe trend composite
+    const shortTrend = (px > s10 ? 0.3 : -0.3) + cl(r5 * 8, -0.4, 0.4);
+    const medTrend = (px > s30 ? 0.25 : -0.25) + cl(r15 * 5, -0.3, 0.3);
+    const longTrend = px > s50 ? 0.15 : -0.15;
+
+    // Volatility adjustment: scale down in high-vol, up in low-vol
+    const volAdj = v20 > 0.001 ? cl(0.015 / v20, 0.3, 2.0) : 1;
+
+    // Mean-reversion overlay
+    const ext = (px - s30) / (v20 || 0.01);
+    const mr = ext > 2 ? -0.4 : ext < -2 ? 0.4 : 0;
+
+    // Regime-aware: in mean-reverting regime, flip momentum
+    const regimeFlip = regime.trend === "mean_reverting" ? -0.5 : regime.trend === "trending" ? 1.2 : 1;
+
+    const comp = (shortTrend + medTrend + longTrend + mr) * volAdj * regimeFlip;
+    const ac = Math.abs(comp);
+    if (ac < 0.12) continue;
+
+    sigs.push({ id: "mom_" + mid + "_" + time, source: "momentum", time, cid: mid,
+      dir: comp > 0 ? "BUY_YES" : "BUY_NO",
+      edge: +(ac * 0.05).toFixed(4), conf: +cl(0.4 + ac * 0.25, 0, 0.95).toFixed(3),
+      fv: r4(px + comp * 0.015), px,
+      hl: 240000, exp: time + 300000,
+      qs: +(ac * cl(p.length / 100, 0, 1)).toFixed(3) });
+  }
+  return sigs;
+}
+
+// Phase 3: Cointegration-aware stat arb with entry/exit bands
+function arbSigs(mkts, hists, time) {
+  const sigs = [];
+  for (const pair of PAIRS) {
+    const mA = mkts[pair.a], mB = mkts[pair.b];
+    if (!mA || !mB) continue;
+    const hA = hists[pair.a], hB = hists[pair.b];
+    if (!hA || !hB || hA.prices.length < 30 || hB.prices.length < 30) continue;
+    const n = Math.min(hA.prices.length, hB.prices.length, 50);
+    const pA = hA.prices.slice(-n), pB = hB.prices.slice(-n);
+    const ma = pA.reduce((s, v) => s + v, 0) / n, mb = pB.reduce((s, v) => s + v, 0) / n;
+
+    // Correlation
+    let cov = 0, va = 0, vb = 0;
+    for (let i = 0; i < n; i++) { cov += (pA[i] - ma) * (pB[i] - mb); va += (pA[i] - ma) ** 2; vb += (pB[i] - mb) ** 2; }
+    const corr = (va && vb) ? cov / Math.sqrt(va * vb) : 0;
+    if (Math.abs(corr) < 0.25) continue;
+
+    // Stability check (split-half)
+    const h = Math.floor(n / 2);
+    const hc = (a, b) => { const l = a.length; if (l < 5) return 0; const am = a.reduce((s, v) => s + v, 0) / l, bm = b.reduce((s, v) => s + v, 0) / l; let c = 0, av = 0, bv = 0; for (let i = 0; i < l; i++) { c += (a[i] - am) * (b[i] - bm); av += (a[i] - am) ** 2; bv += (b[i] - bm) ** 2; } return (av && bv) ? c / Math.sqrt(av * bv) : 0; };
+    const stab = 1 - Math.abs(hc(pA.slice(0, h), pB.slice(0, h)) - hc(pA.slice(h), pB.slice(h)));
+    if (stab < 0.5) continue;
+
+    // Phase 3: Cointegration check — ADF-like stationarity test on spread
+    const beta = hStd(pA, 30) > 0 ? corr * (hStd(pB, 30) / hStd(pA, 30)) : 0;
+    const spread = [];
+    for (let i = 0; i < n; i++) spread.push(pB[i] - beta * pA[i]);
+    const spreadMean = spread.reduce((s, v) => s + v, 0) / spread.length;
+    const spreadStd = Math.sqrt(spread.reduce((s, v) => s + (v - spreadMean) ** 2, 0) / (spread.length - 1)) || 0.001;
+    // Simple stationarity: check if spread mean-reverts (autocorrelation of changes < 0)
+    const spreadChanges = [];
+    for (let i = 1; i < spread.length; i++) spreadChanges.push(spread[i] - spread[i - 1]);
+    const lagCorr = spreadChanges.length > 5 ? (() => {
+      const m = spreadChanges.reduce((s, v) => s + v, 0) / spreadChanges.length;
+      let num = 0, den = 0;
+      for (let i = 1; i < spreadChanges.length; i++) { num += (spreadChanges[i] - m) * (spreadChanges[i - 1] - m); den += (spreadChanges[i] - m) ** 2; }
+      return den > 0 ? num / den : 0;
+    })() : 0;
+    // Negative lag-1 autocorrelation suggests mean-reversion (cointegrated)
+    const isCointegrated = lagCorr < -0.15;
+    if (!isCointegrated) continue;
+
+    // Z-score of current spread
+    const currentSpread = mB.yes - beta * mA.yes;
+    const z = (currentSpread - spreadMean) / spreadStd;
+    if (Math.abs(z) < 1.5) continue;  // Entry band
+
+    const mismatch = currentSpread - spreadMean;
+    const ne = Math.abs(mismatch) - 0.015 - 0.003;
+    if (ne <= 0) continue;
+
+    const cc = +(Math.abs(corr) * stab * cl(n / 50, 0, 1)).toFixed(3);
+    sigs.push({ id: "arb_" + pair.a + "_" + pair.b + "_" + time, source: "arb", time, cid: mB.id,
+      dir: mismatch > 0 ? "BUY_NO" : "BUY_YES",
+      edge: +ne.toFixed(4), conf: +cl(0.3 + Math.abs(z) * 0.12 * cc, 0, 0.95).toFixed(3),
+      fv: r4(cl(spreadMean + beta * mA.yes, 0.02, 0.98)), px: mB.yes,
+      hl: 600000, exp: time + 600000,
+      qs: +(cc * cl(Math.abs(z) / 3, 0, 1)).toFixed(3),
+      z: +z.toFixed(2), corr: +corr.toFixed(3), stab: +stab.toFixed(3),
+      pair: pair.a + "\u2194" + pair.b, coint: true });
+  }
+  return sigs;
+}
+
+// Phase 3: Orderflow imbalance signals (from LOB state)
+function orderflowSigs(mkts, lobs, time) {
+  const sigs = [];
+  for (const [mid, m] of Object.entries(mkts)) {
+    const lob = lobs[mid];
+    if (!lob || lob.bidDepth < 10 || lob.askDepth < 10) continue;
+    // Orderflow imbalance = (bidDepth - askDepth) / (bidDepth + askDepth)
+    const imbalance = (lob.bidDepth - lob.askDepth) / (lob.bidDepth + lob.askDepth);
+    const absImb = Math.abs(imbalance);
+    if (absImb < 0.15) continue;  // Need meaningful imbalance
+    // Trade intensity: volume relative to ADV
+    const intensity = m.adv > 0 ? cl(lob.volumeThisTick / (m.adv * 0.01), 0, 2) : 0;
+    // Edge from imbalance: strong imbalance predicts price direction
+    const edge = absImb * 0.03 * (1 + intensity * 0.5);
+    if (edge < 0.004) continue;
+    sigs.push({ id: "oflow_" + mid + "_" + time, source: "momentum", time, cid: mid,
+      dir: imbalance > 0 ? "BUY_YES" : "BUY_NO",
+      edge: +edge.toFixed(4), conf: +cl(0.3 + absImb * 0.4, 0.2, 0.85).toFixed(3),
+      fv: r4(cl(m.yes + imbalance * 0.02, 0.02, 0.98)), px: m.yes,
+      hl: 120000, exp: time + 240000,
+      qs: +(absImb * 0.8).toFixed(3) });
+  }
+  return sigs;
+}
 
 // ══════════════════════ ENGINE: SIGNAL PROCESSING ════════════════════
+// Sizing uses LIVE state: equity, DD, notional room, position room, CB cap.
+function processSigs(signals, weights, regConf, time, liveState) {
+  const live = liveState || {};
+  const liveEquity = typeof live.equity === "number" && live.equity > 0 ? live.equity : CFG.initialEquity;
+  const liveDD = typeof live.currentDD === "number" ? live.currentDD : 0;
+  const liveGross = typeof live.grossExposure === "number" ? live.grossExposure : 0;
+  const livePositions = live.positions || {};
+  const liveMarkets = live.markets || {};
+  const liveCbState = live.cbState || "closed";
+  const ddScale = liveDD >= CFG.maxDD ? 0 : liveDD > CFG.softDD ? 1 - Math.pow(liveDD / CFG.maxDD, 1.5) : 1;
+  const capitalBase = liveEquity * ddScale;
+  const remainingNotionalRoom = Math.max(0, CFG.maxExpNotional - liveGross);
+
+  let sigs = signals.filter(s => s.exp > time && (time - s.time) / (s.exp - s.time) < 0.8);
+  sigs = sigs.map(s => { const fr = Math.pow(0.5, (time - s.time) / (s.hl || 300000)); return { ...s, fr: +fr.toFixed(3), ee: +(s.edge * fr).toFixed(4) }; });
+  const best = {}; for (const s of sigs) { const k = s.source + ":" + s.cid; if (!best[k] || s.ee > best[k].ee) best[k] = s; }
+  sigs = Object.values(best).filter(s => (s.qs || 0.5) > 0.15);
+  const byM = {}; for (const s of sigs) (byM[s.cid] || (byM[s.cid] = [])).push(s);
+  const recs = [];
+  for (const [mid, ms] of Object.entries(byM)) {
+    let comp = 0;
+    for (const s of ms) comp += s.ee * (s.dir === "BUY_YES" ? 1 : -1) * s.conf * (weights[s.source] || 0.33);
+    const signs = ms.map(s => s.dir === "BUY_YES" ? 1 : -1);
+    const conc = Math.abs(signs.reduce((a, b) => a + b, 0)) / signs.length;
+    const conf = +cl(0.4 * conc + 0.3 * cl(Math.abs(comp) * 2, 0, 1) + 0.15 * cl(ms.length / 3, 0, 1) + 0.15 * regConf, 0, 0.95).toFixed(3);
+    const dir = comp >= 0 ? "BUY_YES" : "BUY_NO";
+    const ae = Math.abs(comp) * (0.5 + conc * 0.5);
+    if (ae < 0.006) continue;
+    const px = ms[0].px || 0.5;
+    const odds = comp > 0 ? px / (1 - px + 1e-4) : (1 - px) / (px + 1e-4);
+    // Phase 4: Kelly capped by regime confidence
+    const regimeKellyCap = regConf > 0.7 ? 0.25 : regConf > 0.4 ? 0.18 : 0.10;
+    const kelly = cl((ae * odds - (1 - ae)) / (odds + 1e-4) * 0.5, 0, regimeKellyCap) * conf;
+    const mkt = liveMarkets[mid];
+    const sidePrice = mkt ? (dir === "BUY_YES" ? mkt.yes : 1 - mkt.yes) : 0.5;
+    // Phase 4: volatility-targeted sizing
+    const mktVol = mkt ? mkt.vol || 0.02 : 0.02;
+    const volScale = mktVol > 0.001 ? cl(CFG.volTargetAnnual / (mktVol * Math.sqrt(252)), 0.3, 2) : 1;
+    let desiredQty = Math.floor(kelly * capitalBase * volScale);
+    if (sidePrice > 0) desiredQty = Math.min(desiredQty, Math.floor(remainingNotionalRoom / sidePrice));
+    const pos = livePositions[mid] || { yesQty: 0, noQty: 0 };
+    desiredQty = Math.min(desiredQty, Math.max(0, CFG.maxPos - pos.yesQty - pos.noQty));
+    if (mkt) {
+      let catQty = 0;
+      for (const [om, op] of Object.entries(livePositions)) { const omk = liveMarkets[om]; if (omk && omk.cat === mkt.cat) catQty += op.yesQty + op.noQty; }
+      desiredQty = Math.min(desiredQty, Math.max(0, CFG.maxCatQty - catQty));
+    }
+    if (liveCbState === "half_open" && sidePrice > 0) desiredQty = Math.min(desiredQty, Math.floor(CFG.cbHalfOpenMaxNotional / sidePrice));
+    if (desiredQty < 15) continue;
+    const attr = {}; ms.forEach(s => { attr[s.source] = (attr[s.source] || 0) + s.ee * s.conf; });
+    const ta = Object.values(attr).reduce((s, v) => s + Math.abs(v), 0) || 1;
+    Object.keys(attr).forEach(k2 => attr[k2] = +((Math.abs(attr[k2]) / ta) * 100).toFixed(1));
+    recs.push({ id: "rec_" + mid + "_" + time, time, cid: mid, dir, ce: +ae.toFixed(4), conf, conc: +conc.toFixed(2), sz: desiredQty, attr, nSigs: ms.length, urg: ae > 0.025 ? "immediate" : ae > 0.012 ? "patient" : "passive", aq: +(ms.reduce((s, x) => s + (x.qs || 0.5), 0) / ms.length).toFixed(3) });
+  }
+  return { filtered: sigs, recs };
+}
 
 // ══════════════════════ ENGINE: RISK ═════════════════════════════════
 function calcExposure(positions, markets) {
