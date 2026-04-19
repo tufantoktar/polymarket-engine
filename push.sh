@@ -1,44 +1,59 @@
 #!/bin/bash
-# Polymarket Engine — GitHub Push Script
-# Usage: ./push.sh <github-username>
+# Push Polymarket Engine to https://github.com/tufantoktar/learning_git
+#
+# Usage:
+#   ./push.sh                    # push to main (force-push, overwrites existing)
+#   ./push.sh --branch polymarket-engine   # push to a new branch instead (SAFER)
 #
 # Prerequisites:
-#   1. Create an empty repo at https://github.com/new → name: polymarket-engine
-#   2. Have a GitHub Personal Access Token (PAT) ready
-#      → GitHub → Settings → Developer Settings → Personal Access Tokens → Generate
-#      → Scope: "repo" is enough
-#
-# This script will push the full repo with 2 commits (V4.3.1 + V4.3.2)
+#   - GitHub Personal Access Token (PAT) with "repo" scope
+#     Generate: https://github.com/settings/tokens
+#   - When git prompts for password, paste the TOKEN (not your GitHub password)
 
 set -e
 
-if [ -z "$1" ]; then
-  echo "Usage: ./push.sh <github-username>"
-  echo "Example: ./push.sh myuser"
-  exit 1
+USERNAME="tufantoktar"
+REPO="learning_git"
+BRANCH="main"
+FORCE=""
+
+if [ "$1" = "--branch" ] && [ -n "$2" ]; then
+  BRANCH="$2"
+  echo "Mode: pushing to branch '$BRANCH' (main stays untouched)"
+else
+  FORCE="-f"
+  echo "Mode: force-push to main (will overwrite existing repo contents)"
+  echo "If learning_git has other projects, cancel (Ctrl-C) and use:"
+  echo "   ./push.sh --branch polymarket-engine"
+  echo ""
+  read -p "Continue force-pushing to main? (y/N) " confirm
+  if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+    echo "Cancelled."; exit 0
+  fi
 fi
 
-USERNAME="$1"
-REPO="polymarket-engine"
-
-echo "=== Polymarket Engine Push ==="
-echo "Target: https://github.com/$USERNAME/$REPO"
+echo ""
+echo "=== Polymarket Engine → GitHub ==="
+echo "Target: https://github.com/$USERNAME/$REPO  (branch: $BRANCH)"
 echo ""
 
-# Set git identity if not already set
+# Local git identity (only if missing)
 git config user.name 2>/dev/null || git config user.name "$USERNAME"
 git config user.email 2>/dev/null || git config user.email "$USERNAME@users.noreply.github.com"
 
-# Add remote (remove first if exists)
+# Set remote
 git remote remove origin 2>/dev/null || true
 git remote add origin "https://github.com/$USERNAME/$REPO.git"
 
-echo "Pushing to GitHub..."
-echo "(GitHub will ask for username + token as password)"
-echo ""
+# Switch to target branch
+if [ "$BRANCH" != "main" ]; then
+  git checkout -B "$BRANCH"
+fi
 
-git push -u origin main
+echo "Pushing... (username=$USERNAME, password=your PAT)"
+echo ""
+git push -u $FORCE origin "$BRANCH"
 
 echo ""
-echo "=== Done! ==="
-echo "View at: https://github.com/$USERNAME/$REPO"
+echo "=== Done ==="
+echo "View: https://github.com/$USERNAME/$REPO/tree/$BRANCH"
