@@ -1,5 +1,43 @@
 # Changelog
 
+## [5.2.0] — Phase 2 Modular Extraction
+
+### Changed
+- **Extracted core engine from App.jsx into 5 new modules.** Zero behavior change.
+- App.jsx reduced 1202 → 276 lines (orchestration + UI only).
+
+### New modules
+```
+src/engine/
+├── execution.js    canTransition, createOrder, advanceOrderFills,
+│                   resolvePartialFill, computeAdaptiveLimit,
+│                   TERMINAL, TRANSITIONS, FSM lifecycle
+├── risk.js         calcExposure, preTradeRisk (8-check pipeline)
+├── portfolio.js    applyFills, rebuildPositionsFromFills,
+│                   computeMetrics, applyAttributionEvents
+├── system.js       reconcile, tripCB, updateCB, record* trackers,
+│                   appendEventLog, computePerformanceMetrics,
+│                   pruneOrderHistory, collectProtectedOrderIds
+└── tick.js         initState, tick (orchestration only)
+src/tests/
+└── runTests.js     52-test deterministic suite
+```
+
+### Validation
+- 52/52 tests pass after extraction
+- Deterministic replay: `initState(42) + tick(s, 10000)` byte-identical to V5.1
+- 100-tick cross-check vs V5.1 baseline: **byte-identical** final equity,
+  fills, orderSeq, orders, orderHistory, eventLog, realizedPnl, CB state
+- App.jsx contains zero business logic (only imports + React UI + orchestration)
+
+### Architecture rules enforced
+- All engine modules are pure functions (input → output)
+- No React imports inside `src/engine/*` or `src/tests/*`
+- No direct state mutation outside returned values
+- All randomness via seeded RNG
+
+---
+
 ## [5.1.0] — Phase 1 Modular Refactor
 
 ### Changed

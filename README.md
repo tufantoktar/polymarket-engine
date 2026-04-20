@@ -57,6 +57,12 @@ Open `http://localhost:5173` and click **START**.
 
 ## Version History
 
+### V5.2 — Phase 2 Modular Extraction
+- Extracted execution, risk, portfolio, system, tick from App.jsx into `src/engine/*`
+- Extracted 52-test suite into `src/tests/runTests.js`
+- App.jsx reduced to 276 lines (orchestration + UI only, zero business logic)
+- 52/52 tests pass · 100-tick replay byte-identical to V5.1
+
 ### V5.1 — Phase 1 Modular Refactor
 - Extracted pure/low-risk modules: config, math, prng, history, regime, market, alpha
 - Zero behavior change: 52/52 tests pass, determinism verified
