@@ -1,5 +1,55 @@
 # Changelog
 
+## [5.3.0] — Live Trading Integration (Paper + Real)
+
+### Added
+- **Real Polymarket CLOB integration** — place/cancel orders, stream orderbooks, sync positions
+- **Paper + live mode separation** — share same code path; switch via `TRADING_MODE` env var
+- **Kill switch** — file-sentinel (`.KILL`), env var (`KILL_SWITCH=1`), SIGINT/SIGTERM, all converge on `cancelAllOrders()`
+
+### New modules (all in `src/live/`, Node.js only)
+```
+src/live/
+├── config.js             env-driven configuration + mode selector + validation
+├── logger.js             structured JSONL logs (decisions / trades / errors)
+├── retry.js              exponential backoff + jitter, retryable classifier
+├── polymarketClient.js   CLOB + Gamma API façade with TTL caching
+├── wallet.js             ethers wallet, USDC balance, CTF positions, approvals
+├── liveRisk.js           daily-loss stop, concurrent-order cap, slippage, emergency stop
+├── liveExecution.js      placeOrder / cancelOrder / getOpenOrders / syncPositions
+├── liveSignals.js        bridge CLOB orderbooks → existing Phase 1 alpha (momSigs, orderflowSigs)
+└── eventLoop.js          5-second continuous loop with graceful shutdown
+scripts/
+├── runLive.js            entry point (npm run live:paper | npm run live)
+└── tradeHistory.js       CLI log viewer (bonus)
+config-examples/
+└── .env.example          every configurable parameter documented
+```
+
+### Design decisions
+- **Paper mode is dependency-free** — live mode only pulls in `@polymarket/clob-client` and `ethers` via dynamic `import()`. Both are listed under `optionalDependencies` so `npm install` works without them.
+- **Phase 1/2 engine untouched** — `src/engine/*` imported verbatim. Live signals flow: CLOB orderbook → `liveSignals.ingestOrderbook` → `momSigs` / `orderflowSigs` → `processSigs` → `liveExecution.placeOrder`.
+- **Risk layered** — `liveRisk.js` is the *outer* gate (real-money limits); existing `src/engine/risk.js` remains the *inner* gate (position/exposure consistency). Both run per order.
+- **No credentials in code** — `PRIVATE_KEY`, `FUNDER_ADDRESS`, API keys read from env only. `.env.example` provided; `.env` gitignored.
+
+### Verified
+- All 11 new files pass `node --check`
+- Paper-mode smoke test runs cleanly: config validates, wallet initializes (stub), event loop ticks, SIGTERM triggers cancelAll + graceful shutdown
+- Error handling verified via 403 from Gamma API (geo-block in sandbox) — no crash, logged to `errors.jsonl`, loop continues
+- React app (V5.2 simulator) untouched — no `live/` imports in `App.jsx` or `main.jsx`
+- `npm run trades:all` CLI displays trade log correctly
+
+### Commands
+```bash
+npm run live:paper       # paper trading (no credentials needed)
+npm run install:live     # install CLOB SDK + ethers for live mode
+npm run live             # real trading (requires PRIVATE_KEY env)
+npm run trades           # view last 50 trade log entries
+npm run trades -- --since=1h --event=live:placeOrder
+```
+
+---
+
 ## [5.2.0] — Phase 2 Modular Extraction
 
 ### Changed

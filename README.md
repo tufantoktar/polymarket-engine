@@ -57,6 +57,24 @@ Open `http://localhost:5173` and click **START**.
 
 ## Version History
 
+### V5.3 — Live Trading Integration
+- Real Polymarket CLOB integration via `@polymarket/clob-client`
+- Paper + live mode via `TRADING_MODE` env var (paper is dependency-free)
+- Wallet (ethers), USDC balance, CTF positions, auto-approvals
+- Event loop with 5s ticks, kill switch, graceful shutdown
+- Daily-loss stop, concurrent-order cap, slippage tolerance, emergency stop
+- Structured JSONL logs + CLI trade-history viewer
+
+Quick start:
+```bash
+npm run live:paper       # paper mode, no credentials needed
+npm run install:live     # add CLOB SDK + ethers
+npm run live             # live mode (requires PRIVATE_KEY env)
+npm run trades           # view trade log
+```
+
+See `config-examples/.env.example` for every parameter.
+
 ### V5.2 — Phase 2 Modular Extraction
 - Extracted execution, risk, portfolio, system, tick from App.jsx into `src/engine/*`
 - Extracted 52-test suite into `src/tests/runTests.js`
