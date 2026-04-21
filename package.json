@@ -1,7 +1,7 @@
 {
   "name": "polymarket-engine",
   "private": true,
-  "version": "5.3.0",
+  "version": "5.4.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -11,7 +11,10 @@
     "live": "TRADING_MODE=live node scripts/runLive.js",
     "trades": "node scripts/tradeHistory.js",
     "trades:all": "node scripts/tradeHistory.js --all",
-    "install:live": "npm install @polymarket/clob-client ethers@5"
+    "install:live": "npm install @polymarket/clob-client ethers@5",
+    "test:state": "node scripts/testStateModules.js",
+    "test:exec": "node scripts/testExecutionFlow.js",
+    "test:live": "node scripts/testStateModules.js && node scripts/testExecutionFlow.js"
   },
   "dependencies": {
     "react": "^18.3.1",

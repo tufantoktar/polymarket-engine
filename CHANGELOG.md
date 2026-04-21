@@ -1,5 +1,69 @@
 # Changelog
 
+## [5.4.0] — State Module Extraction & Execution Hardening
+
+### Added
+Four new state modules under `src/live/state/` that establish clean domain boundaries for order lifecycle, storage, positions, and idempotency:
+
+- `orderStateMachine.js` — strict FSM with explicit transitions
+  - States: IDLE → SIGNAL_DETECTED → ORDER_PLACED → PARTIAL_FILL → FILLED / CANCELLED / FAILED
+  - Terminal states protected; invalid transitions return structured failure (no throw, no silent mutation)
+  - Every transition appends to order history for full auditability
+
+- `orderStore.js` — in-memory order registry
+  - Three indexes: orderId / signalKey / externalOrderId
+  - Duplicate detection: rejects same signalKey while prior order is non-terminal
+  - Atomic transitions through FSM only — no direct state mutation
+  - Internal orderId is source of truth; externalOrderId mapped separately
+
+- `positionStore.js` — position tracking with PnL
+  - Per-tokenId records with qty, avgEntryPrice, realizedPnl, totalBuyQty, totalSellQty
+  - Weighted-average entry price on successive BUYs
+  - Realized PnL computed on SELL
+  - `restorePositions()` for reconciliation against exchange snapshots
+  - `getNetExposure()` returns gross + net notional
+
+- `signalDeduper.js` — signal-level idempotency
+  - Deterministic `buildSignalKey(signal)` with configurable timestamp bucketing (default 30s)
+  - Bounded LRU cache (default 5000 entries) + TTL (default 5 min)
+  - Prevents duplicate order submission when the same signal recurs across ticks
+
+### Refactored
+- `liveExecution.js` — drops the ad-hoc `Map<orderId, entry>` and `Map<tokenId, qty>` from V5.3:
+  - All order state now in `OrderStore`
+  - All position state now in `PositionStore`
+  - All idempotency through `SignalDeduper`
+  - New `applyFill()` method drives both FSM advance and position update
+  - Every transition emits a structured `order:transition` decision log
+  - Supports lookup by either internal or external order ID
+- `eventLoop.js` — now a pure orchestrator:
+  - Emits one `tick:summary` structured log per iteration with full state snapshot (signals, placements, orders, positions, risk)
+  - Owns no lifecycle logic; delegates to `LiveExecutionEngine`
+  - Builds deterministic `signalKey` per recommendation before handing to execution
+  - Periodic `deduper.clearExpired()` housekeeping every 20 ticks
+
+### Validation
+- **64/64 state-module unit tests pass** (`scripts/testStateModules.js`)
+- **34/34 execution-flow integration tests pass** (`scripts/testExecutionFlow.js`)
+- All 52 engine tests from V5.2 still green
+- Paper-mode runtime: boots → ticks → emits structured summaries → SIGTERM graceful shutdown
+- Test coverage: FSM transitions, duplicate detection, LRU eviction, TTL expiration, weighted avg, realized PnL, partial fills, risk clamping, cancelAll
+
+### Design principles
+- No implicit mutation; all state transitions are explicit and logged
+- No hidden shared mutable state; state owned by single module per concern
+- Pure state-machine module; stores are thin wrappers around FSM + indexes
+- Backward compatible: `placeOrder`, `cancelOrder`, `getOpenOrders`, `syncPositions`, `snapshot` surfaces preserved
+
+### New scripts
+```
+scripts/
+├── testStateModules.js     unit tests for FSM + stores + deduper
+└── testExecutionFlow.js    end-to-end execution flow with mock client
+```
+
+---
+
 ## [5.3.0] — Live Trading Integration (Paper + Real)
 
 ### Added

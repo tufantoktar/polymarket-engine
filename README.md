@@ -57,6 +57,22 @@ Open `http://localhost:5173` and click **START**.
 
 ## Version History
 
+### V5.4 — State Module Extraction & Execution Hardening
+- New `src/live/state/` modules: `orderStateMachine`, `orderStore`, `positionStore`, `signalDeduper`
+- Strict order FSM with explicit transitions (IDLE → SIGNAL_DETECTED → ORDER_PLACED → PARTIAL_FILL → FILLED/CANCELLED/FAILED)
+- In-memory order registry with three indexes, duplicate detection, atomic transitions
+- Position store with weighted avg entry and realized PnL tracking
+- Signal deduper with deterministic keys + LRU + TTL (prevents duplicate orders from same signal)
+- `liveExecution.js` + `eventLoop.js` refactored to use state modules (no ad-hoc Maps)
+- Every tick emits structured `tick:summary` JSONL with full state snapshot
+- 98/98 new tests pass (64 state module + 34 execution flow)
+
+Quick test:
+```bash
+node scripts/testStateModules.js       # 64 unit tests
+node scripts/testExecutionFlow.js      # 34 integration tests
+```
+
 ### V5.3 — Live Trading Integration
 - Real Polymarket CLOB integration via `@polymarket/clob-client`
 - Paper + live mode via `TRADING_MODE` env var (paper is dependency-free)
