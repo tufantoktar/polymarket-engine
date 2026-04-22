@@ -1,5 +1,103 @@
 # Changelog
 
+## [5.5.0] — Production Reliability
+
+### Added
+Five new modules that upgrade the bot from modular runtime to production-grade reliability. All build on top of the V5.4 state modules without breaking any boundaries.
+
+- `src/live/execution/slippage.js` — pure book-walk VWAP + slippage/liquidity guard
+  - `estimateExecutionPrice(book, side, size)` → `{estimatedPrice, filledSize, shortfall, levelsTouched}`
+  - `computeSlippage(est, ref, side)` → signed bps (direction-aware)
+  - `checkLiquidity(book, side)` → total USDC notional available
+  - `evaluateSlippageAndLiquidity(args)` → full guard: `{allowed, estimatedPrice, referencePrice, slippage, availableLiquidity, levelsTouched, shortfall, reason}`
+
+- `src/live/monitoring/killSwitch.js` — `KillSwitch` class with 5 auto-triggers
+  - daily loss exceeds `config.risk.maxDailyLoss`
+  - consecutive API errors exceed threshold
+  - rolling API failure rate exceeds threshold
+  - stuck orders (resting / partial past timeout without progress)
+  - manual `.KILL` file or `KILL_SWITCH=1` env (V5.3 behavior preserved)
+  - Halts are permanent for the session with structured reason objects
+  - Records API success/failure + order progress events from liveExecution
+
+- `src/live/sync/reconciliation.js` — `syncPositions(deps)` covers all 5 drift cases
+  - Position present on exchange, missing locally → restore
+  - Position present locally, absent on exchange → correct (zero out)
+  - Partial fill drift between local and remote → update filledSize + avg
+  - External open order missing internally → mark for review
+  - Internal open order absent on exchange → transition via authoritative remote status
+  - All mutations go through `orderStore.transition()` (FSM-safe) and `positionStore.set()`
+  - Returns exact shape required by spec: `{timestamp, positionsRestored, positionsCorrected, ordersRestored, ordersCorrected, mismatches, errors}`
+
+- `src/live/sync/startupRecovery.js` — `runStartupRecovery(deps)` restores state on boot
+  - Walks exchange open orders → creates internal records via FSM `IDLE → SIGNAL_DETECTED → ORDER_PLACED [→ PARTIAL_FILL]`
+  - Restores positions from wallet balance reads
+  - Populates `SignalDeduper` with deterministic `source=recovered` signal keys so fresh post-boot signals cannot duplicate recovered orders
+  - Feature-flagged via `config.recovery.enabled`
+  - Event loop awaits this before first live tick
+
+- `src/live/monitoring/health.js` — `HealthMonitor` read-only aggregator
+  - `getHealthStatus({livePrices})` → full runtime status: running/halted/openOrders/openPositions/realizedPnl/unrealizedPnl/dailyPnl/apiFailureRate/consecutiveErrors/lastReconcileAt/recovery/...
+  - `getSummaryLine()` → compact single-line CLI output
+  - `recordTick/recordReconciliation/recordRecoveryStarted/recordRecoveryFinished` hooks
+
+### Integration updates
+- `src/live/liveExecution.js`
+  - Step-0 kill-switch gate at top of `placeOrder` (fast reject when halted)
+  - Step-3.5 slippage+liquidity guard after risk pass (live mode only)
+  - `killSwitch.recordApiSuccess/Failure` on client.placeOrder try/catch
+  - `killSwitch.recordOrderProgress/Terminal` on FSM transitions
+  - `risk.recordRealizedPnl(delta)` on fills — feeds the daily-loss trigger
+  - killSwitch added to `snapshot()`
+
+- `src/live/eventLoop.js`
+  - Constructs `KillSwitch` + `HealthMonitor` and injects killSwitch into `LiveExecutionEngine`
+  - Awaits `runStartupRecovery` during `init()` — live trading blocked until done
+  - Optional boot-time reconciliation (`reconciliation.runOnStart`)
+  - Periodic `syncPositions` on `reconciliation.intervalMs`
+  - Per tick: `killSwitch.evaluate(ctx)` gate with auto-cancel on first halt
+  - Per tick: full health snapshot embedded in `tick:summary` log entry
+  - SIGINT/SIGTERM handler now also calls `killSwitch.triggerManual()`
+
+### Config additions (all env-overridable, backward compatible)
+```
+execution.maxSlippageBps        EXEC_MAX_SLIPPAGE_BPS=50
+execution.minLiquidity          EXEC_MIN_LIQUIDITY=200
+reconciliation.intervalMs       RECONCILIATION_INTERVAL_MS=30000
+reconciliation.runOnStart       RECONCILIATION_RUN_ON_START=true
+recovery.enabled                STARTUP_RECOVERY_ENABLED=true
+recovery.timeoutMs              STARTUP_RECOVERY_TIMEOUT_MS=30000
+monitoring.maxConsecutiveErrors MAX_CONSECUTIVE_ERRORS=5
+monitoring.maxApiFailureRate    MAX_API_FAILURE_RATE=0.5
+monitoring.apiWindowSize        API_WINDOW_SIZE=20
+monitoring.stuckOrderTimeoutMs  STUCK_ORDER_TIMEOUT_MS=120000
+monitoring.healthLogIntervalMs  HEALTH_LOG_INTERVAL_MS=15000
+```
+
+### Validation
+- **67/67 new reliability tests pass** (`scripts/testReliabilityModules.js`)
+  - slippage: book-walk VWAP, signed bps, liquidity check, all guard rejection paths
+  - killSwitch: 5 triggers including stuck-order detection, sticky halt, manual trigger, snapshot shape
+  - health: status composition, unrealized PnL via livePrices, recovery/reconcile tracking
+  - reconciliation: order state correction, position restore, position zeroing, paper short-circuit
+  - startupRecovery: order + position restore, deduper population, paper short-circuit, disabled flag
+- **34/34 V5.4 execution-flow tests still pass** (no regression)
+- **64/64 V5.4 state-module tests still pass**
+- Paper-mode runtime smoke: boot → recovery → reconciliation → ticks with health snapshot → SIGTERM → `manual_api` kill-switch trigger → graceful cancelAll
+
+### New npm scripts
+```
+npm run test:reliability    # 67 V5.5 reliability tests
+npm run test:all            # state + execution + reliability (165 total)
+```
+
+### Remaining risks deferred to later phases
+- Reconciliation relies on `getOrderStatus` for orders that disappear from `getOpenOrders`. If the exchange status endpoint is unreliable we may misclassify — a conservative fallback (query fills endpoint) is a future hardening.
+- Cost-basis is not recovered on restart — local `avgEntryPrice` starts at 0 for positions the bot didn't open. Acceptable because PnL is realized per fill going forward.
+- Unrealized PnL in `HealthMonitor` requires a `livePrices` map from the caller; a built-in price feed would be cleaner but adds coupling.
+
+---
+
 ## [5.4.0] — State Module Extraction & Execution Hardening
 
 ### Added

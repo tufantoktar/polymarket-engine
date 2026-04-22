@@ -30,7 +30,7 @@ async function main() {
     process.exit(1);
   }
 
-  log.info("Polymarket Engine V5.4 — live/paper mode", {
+  log.info("Polymarket Engine V5.5 — live/paper mode", {
     mode: LIVE_CONFIG.mode,
     tickIntervalMs: LIVE_CONFIG.loop.tickIntervalMs,
     maxOrderQty: LIVE_CONFIG.risk.maxOrderQty,

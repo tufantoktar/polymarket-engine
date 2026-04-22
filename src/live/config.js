@@ -115,6 +115,42 @@ export const LIVE_CONFIG = {
     limitOffsetTicks: num("LIMIT_OFFSET_TICKS", 1),
     // Cancel orders that haven't filled in this many ms
     orderTimeoutMs: num("ORDER_TIMEOUT_MS", 60000),
+    // Pre-trade slippage tolerance in bps (checked against book-walk estimate)
+    maxSlippageBps: num("EXEC_MAX_SLIPPAGE_BPS", 50),
+    // Minimum total book-side USDC notional required to attempt an order
+    minLiquidity: num("EXEC_MIN_LIQUIDITY", 200),
+  },
+
+  // ── Reconciliation & recovery (V5.5) ──────────────────────────────────
+  reconciliation: {
+    // How often the loop runs syncPositions() against the exchange
+    intervalMs: num("RECONCILIATION_INTERVAL_MS", 30000),
+    // Run reconciliation on boot after startup recovery finishes
+    runOnStart: bool("RECONCILIATION_RUN_ON_START", true),
+  },
+
+  // ── Startup recovery ──
+  recovery: {
+    // Set to 0/false to skip the pre-loop recovery step (not recommended)
+    enabled: bool("STARTUP_RECOVERY_ENABLED", true),
+    // Max time we'll wait for recovery to finish before giving up
+    timeoutMs: num("STARTUP_RECOVERY_TIMEOUT_MS", 30000),
+  },
+
+  // ── Monitoring / auto kill-switch thresholds ──
+  monitoring: {
+    // Trip after this many back-to-back order or API errors
+    maxConsecutiveErrors: num("MAX_CONSECUTIVE_ERRORS", 5),
+    // Trip if rolling API failure rate exceeds this fraction
+    maxApiFailureRate: num("MAX_API_FAILURE_RATE", 0.5),
+    // Size of the rolling window used for the API failure rate
+    apiWindowSize: num("API_WINDOW_SIZE", 20),
+    // A resting / partial order untouched for this long counts as stuck
+    stuckOrderTimeoutMs: num("STUCK_ORDER_TIMEOUT_MS", 120000),
+    // How often the event loop emits a health snapshot
+    healthLogIntervalMs: num("HEALTH_LOG_INTERVAL_MS", 15000),
+    // Turn the entire startup recovery feature on/off (mirrors recovery.enabled)
+    startupRecoveryEnabled: bool("STARTUP_RECOVERY_ENABLED", true),
   },
 
   // ── Logging ──

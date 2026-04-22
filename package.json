@@ -1,7 +1,7 @@
 {
   "name": "polymarket-engine",
   "private": true,
-  "version": "5.4.0",
+  "version": "5.5.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -14,7 +14,9 @@
     "install:live": "npm install @polymarket/clob-client ethers@5",
     "test:state": "node scripts/testStateModules.js",
     "test:exec": "node scripts/testExecutionFlow.js",
-    "test:live": "node scripts/testStateModules.js && node scripts/testExecutionFlow.js"
+    "test:live": "node scripts/testStateModules.js && node scripts/testExecutionFlow.js",
+    "test:reliability": "node scripts/testReliabilityModules.js",
+    "test:all": "node scripts/testStateModules.js && node scripts/testExecutionFlow.js && node scripts/testReliabilityModules.js"
   },
   "dependencies": {
     "react": "^18.3.1",

@@ -39,6 +39,9 @@ import {
   isTerminalState,
 } from "./state/orderStateMachine.js";
 
+// V5.5: reliability modules
+import { evaluateSlippageAndLiquidity } from "./execution/slippage.js";
+
 export class LiveExecutionEngine {
   /**
    * @param {Object} deps  Optional DI for tests; production leaves blank.
@@ -56,6 +59,11 @@ export class LiveExecutionEngine {
     this.deduper = deps.deduper || new SignalDeduper({
       ttlMs: this.cfg.execution?.orderTimeoutMs ? this.cfg.execution.orderTimeoutMs * 3 : undefined,
     });
+
+    // V5.5: kill switch is optional — constructed by eventLoop and
+    // injected. liveExecution functions without it (paper tests etc.)
+    // but will respect it when present.
+    this.killSwitch = deps.killSwitch || null;
   }
 
   async init() {
@@ -84,6 +92,14 @@ export class LiveExecutionEngine {
   //    7b. on failure: SIGNAL_DETECTED → FAILED
   // ═══════════════════════════════════════════════════════════════════
   async placeOrder(order) {
+    // ─── 0. Kill-switch gate (V5.5) ─────────────────────────────────
+    // Outermost guard — cheaper than any I/O and returns fast when halted.
+    if (this.killSwitch?.isHalted()) {
+      const reason = this.killSwitch.getReason();
+      this.log.decision("placeOrder:halted", { reason });
+      return { success: false, reason: "halted", haltReason: reason };
+    }
+
     // ─── 1. Idempotency key ─────────────────────────────────────────
     const signalKey = order.signalKey || buildSignalKey({
       source: order.source || order.strategy || "manual",
@@ -132,6 +148,29 @@ export class LiveExecutionEngine {
     const adjustedSize = riskCheck.adjustedSize ?? order.size;
     const placed = { ...order, size: adjustedSize };
 
+    // ─── 3.5 Slippage & liquidity guard (V5.5) ──────────────────────
+    // Walk the book for the *adjusted* size and reject if slippage
+    // against the signal-expected price exceeds tolerance. Skipped in
+    // paper mode (the mock book is synthetic and the simulator already
+    // models slippage on its own).
+    if (this.cfg.mode === "live" && book) {
+      const exec = this.cfg.execution || {};
+      const slipResult = evaluateSlippageAndLiquidity({
+        book,
+        side: placed.side,
+        size: adjustedSize,
+        referencePrice: order.expectedPrice ?? book.midPrice ?? null,
+        maxSlippageBps: exec.maxSlippageBps ?? 50,
+        minLiquidity:   exec.minLiquidity   ?? 0,
+      });
+      this.log.decision("placeOrder:slippage", { signalKey, result: slipResult });
+      if (!slipResult.allowed) {
+        this.risk.recordReject(slipResult.reason);
+        this.deduper.mark(signalKey, { stage: "slippage_reject", reason: slipResult.reason });
+        return { success: false, reason: slipResult.reason, signalKey, slippage: slipResult };
+      }
+    }
+
     // ─── 4. Register in store (state = IDLE) ────────────────────────
     const { duplicate, order: newOrder } = this.orders.create({
       signalKey,
@@ -168,7 +207,9 @@ export class LiveExecutionEngine {
     let resp;
     try {
       resp = await this.client.placeOrder(placed);
+      this.killSwitch?.recordApiSuccess();
     } catch (e) {
+      this.killSwitch?.recordApiFailure({ op: "placeOrder", tokenId: order.tokenId });
       this.log.errorEvent("placeOrder:client", e, { orderId: internalId, order: placed });
       this.risk.recordReject("api_error");
       const ftr = this.orders.transition(internalId, ORDER_STATES.FAILED, { reason: `api_error:${e.message}` });
@@ -195,6 +236,7 @@ export class LiveExecutionEngine {
     }
     this._logTransition(tr.order, ORDER_STATES.SIGNAL_DETECTED, ORDER_STATES.ORDER_PLACED);
     this.risk.trackOrder(externalOrderId || internalId);
+    this.killSwitch?.recordOrderProgress(internalId);
 
     return {
       success: true,
@@ -249,6 +291,7 @@ export class LiveExecutionEngine {
     this._logTransition(tr.order, order.state, nextState);
 
     // Update position store — only from actual fills, never from intent
+    const prevRealized = this.positions.get(order.tokenId).realizedPnl;
     const pos = this.positions.applyFill({
       tokenId: order.tokenId,
       side: order.side,
@@ -259,8 +302,19 @@ export class LiveExecutionEngine {
       timestamp: timestamp || Date.now(),
     });
 
+    // V5.5: push realized PnL delta into the risk engine so it can
+    // enforce maxDailyLoss, and let the kill switch track order
+    // progress (for stuck-order detection) / terminal state.
+    const pnlDelta = +(pos.realizedPnl - prevRealized).toFixed(4);
+    if (Math.abs(pnlDelta) > 1e-9) {
+      this.risk.recordRealizedPnl(pnlDelta);
+    }
+
     if (fullyFilled) {
       this.risk.untrackOrder(order.externalOrderId || orderId);
+      this.killSwitch?.recordOrderTerminal(orderId);
+    } else {
+      this.killSwitch?.recordOrderProgress(orderId);
     }
 
     this.log.trade("fill", {
@@ -458,6 +512,7 @@ export class LiveExecutionEngine {
       positions: this.positions.snapshot(),
       dedupe: this.deduper.snapshot(),
       risk: this.risk.snapshot(),
+      killSwitch: this.killSwitch?.snapshot() ?? null,
     };
   }
 }

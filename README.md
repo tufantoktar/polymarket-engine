@@ -57,6 +57,21 @@ Open `http://localhost:5173` and click **START**.
 
 ## Version History
 
+### V5.5 — Production Reliability
+- New modules: `execution/slippage`, `monitoring/killSwitch`, `monitoring/health`, `sync/reconciliation`, `sync/startupRecovery`
+- Auto kill switch: daily loss, consecutive errors, API failure rate, stuck orders, manual `.KILL`
+- Startup recovery blocks live trading until exchange state is restored
+- Periodic reconciliation (every 30s default) with exchange as source of truth
+- Pre-trade slippage + liquidity guard via orderbook walk
+- Health snapshot embedded in every `tick:summary` log entry
+- 67/67 new reliability tests pass (165 tests total: state + exec + reliability)
+
+Quick test:
+```bash
+npm run test:reliability    # 67 new tests
+npm run test:all            # full V5.4 + V5.5 suite
+```
+
 ### V5.4 — State Module Extraction & Execution Hardening
 - New `src/live/state/` modules: `orderStateMachine`, `orderStore`, `positionStore`, `signalDeduper`
 - Strict order FSM with explicit transitions (IDLE → SIGNAL_DETECTED → ORDER_PLACED → PARTIAL_FILL → FILLED/CANCELLED/FAILED)
