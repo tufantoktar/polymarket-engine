@@ -27,14 +27,15 @@
 //  the loop. Errors route to errors.jsonl.
 // ═══════════════════════════════════════════════════════════════════════
 
-import { LIVE_CONFIG, isKillSwitchActive } from "./config.js";
+import { LIVE_CONFIG } from "./config.js";
 import { getLogger } from "./logger.js";
 import { PolymarketClient } from "./polymarketClient.js";
 import { Wallet } from "./wallet.js";
-import { LiveRiskEngine } from "./liveRisk.js";
-import { LiveExecutionEngine } from "./liveExecution.js";
-import { LiveSignalEngine } from "./liveSignals.js";
-import { buildSignalKey } from "./state/signalDeduper.js";
+import { LiveRiskEngine } from "./risk_engine/index.js";
+import { LiveExecutionEngine } from "./execution_engine/index.js";
+import { SignalEngine } from "./signal_engine/index.js";
+import { MarketScanner } from "./market_scanner/index.js";
+import { PortfolioState } from "./portfolio_state/index.js";
 import { sleep } from "./retry.js";
 
 // V5.5 reliability modules
@@ -75,7 +76,19 @@ export class EventLoop {
       killSwitch: this.killSwitch,
       observability: this.observability,
     });
-    this.signals = new LiveSignalEngine(cfg, this.log);
+    this.signals = new SignalEngine(cfg, this.log);
+    this.marketScanner = new MarketScanner({
+      cfg,
+      logger: this.log,
+      client: this.client,
+      signalEngine: this.signals,
+    });
+    this.portfolioState = new PortfolioState({
+      cfg,
+      logger: this.log,
+      wallet: this.wallet,
+      positionStore: this.exec.positions,
+    });
 
     this.health = new HealthMonitor({
       orderStore: this.exec.orders,
@@ -91,7 +104,6 @@ export class EventLoop {
     this._bootAt = Date.now();
     this._running = false;
     this._iterCount = 0;
-    this._activeTokens = new Map();
     this._recoveryDone = false;
     this._lastReconcileAt = 0;
   }
@@ -226,118 +238,12 @@ export class EventLoop {
       killSwitch: this.killSwitch,
       logger: this.log,
       config: this.cfg,
-      tokenIds: [...this._activeTokens.keys()],
+      tokenIds: this.marketScanner.ids(),
     });
     this._lastReconcileAt = Date.now();
     this.health.recordReconciliation(summary);
     this.log.info("Reconciliation complete", { trigger, ...summary });
     return summary;
-  }
-
-  // ═══════════════════════════════════════════════════════════════════
-  //  Internal helpers
-  // ═══════════════════════════════════════════════════════════════════
-
-  /** Select which tokens to monitor from the tradable market list. */
-  async _refreshActiveTokens() {
-    try {
-      const markets = await this.client.getTradableMarkets();
-      const topN = Math.min(markets.length, 20);
-      this._activeTokens.clear();
-      for (const m of markets.slice(0, topN)) {
-        const tokens = m.clobTokenIds ? JSON.parse(m.clobTokenIds) : m.tokens || [];
-        if (tokens.length > 0) {
-          const tokenId = typeof tokens[0] === "string" ? tokens[0] : tokens[0]?.token_id;
-          if (tokenId) {
-            this._activeTokens.set(tokenId, {
-              marketId: m.id || m.conditionId || null,
-              question: m.question,
-              category: m.category || (m.tags && m.tags[0]),
-              adv: Number(m.volume24hr ?? m.volume24Hr ?? 10000),
-              endDate: m.endDate,
-              tickSize: m.orderPriceMinTickSize || "0.01",
-              negRisk: !!m.negRisk,
-            });
-          }
-        }
-      }
-      this.log.info("Active tokens refreshed", { count: this._activeTokens.size });
-    } catch (e) {
-      this.log.errorEvent("refreshActiveTokens", e);
-    }
-  }
-
-  /** Fetch orderbooks for all active tokens and ingest into signals. */
-  async _ingestMarketData() {
-    const tasks = [...this._activeTokens.entries()].map(async ([tokenId, meta]) => {
-      try {
-        const book = await this.client.getOrderbook(tokenId);
-        this.signals.ingestOrderbook(tokenId, book, meta);
-      } catch (e) {
-        this.log.errorEvent("ingestOrderbook", e, { tokenId });
-      }
-    });
-    await Promise.all(tasks);
-  }
-
-  /** Build live-state snapshot used by processSigs + risk checks. */
-  async _buildLiveState() {
-    const walletSnap = await this.wallet.snapshot();
-    // Pull positions from the PositionStore (source of truth in V5.4)
-    const posSnap = this.exec.positions.snapshot();
-    const positions = {};
-    for (const p of posSnap.positions) {
-      positions[p.tokenId] = {
-        yesQty: p.qty > 0 ? p.qty : 0,
-        noQty: p.qty < 0 ? -p.qty : 0,
-      };
-    }
-    return {
-      equity: walletSnap.usdc,
-      currentDD: 0,                              // TODO: session high-water
-      grossExposure: posSnap.exposure.gross,
-      positions,
-      cbState: "closed",
-    };
-  }
-
-  /**
-   * Convert an engine recommendation into a placeOrder shape.
-   * Returns null if we lack necessary data (book, metadata).
-   */
-  async _recToOrder(rec) {
-    const meta = this._activeTokens.get(rec.cid);
-    if (!meta) return null;
-    const book = await this.client.getOrderbook(rec.cid).catch(() => null);
-    if (!book) return null;
-
-    const side = rec.dir === "BUY_YES" ? "BUY" : "SELL";
-    let price = rec.dir === "BUY_YES" ? book.bestAsk : book.bestBid;
-    price = Math.max(0.01, Math.min(0.99, price));
-
-    // Deterministic signal key tied to this recommendation's intent
-    const signalKey = buildSignalKey({
-      source: rec.source || "engine",
-      marketId: meta.marketId,
-      tokenId: rec.cid,
-      side,
-      action: rec.urg || "default",
-      timestamp: rec.ts || Date.now(),
-    });
-
-    return {
-      signalKey,
-      source: rec.source || "engine",
-      marketId: meta.marketId,
-      tokenId: rec.cid,
-      side,
-      price,
-      size: rec.sz,
-      orderType: rec.urg === "immediate" ? "FOK" : "GTC",
-      tickSize: meta.tickSize,
-      negRisk: meta.negRisk,
-      expectedPrice: book.midPrice,
-    };
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -392,10 +298,10 @@ export class EventLoop {
       }
 
       // 1. Refresh tradable markets
-      await this._refreshActiveTokens();
+      await this.marketScanner.refreshActiveTokens();
 
       // 2. Pull orderbooks → ingest into signal engine
-      await this._ingestMarketData();
+      await this.marketScanner.ingestMarketData();
 
       // 3. Housekeeping
       await this.exec.cancelStaleOrders();
@@ -403,7 +309,7 @@ export class EventLoop {
       if (iter % 20 === 0) this.exec.deduper.clearExpired();
 
       // 4. Build state + generate recs
-      liveState = await this._buildLiveState();
+      liveState = await this.portfolioState.buildLiveState();
       recs = this.signals.generateRecommendations(liveState);
 
       // 5. For each rec: translate → place. Dedup + slippage + risk inside placeOrder.
@@ -411,7 +317,7 @@ export class EventLoop {
         // Quick re-check that nothing halted us mid-iteration
         if (this.killSwitch.isHalted()) break;
 
-        const orderReq = await this._recToOrder(rec);
+        const orderReq = await this.marketScanner.recommendationToOrder(rec);
         if (!orderReq) continue;
 
         if (this.exec.deduper.has(orderReq.signalKey)) {
@@ -462,7 +368,7 @@ export class EventLoop {
       iter,
       tsStart: start,
       durationMs: elapsed,
-      activeTokens: this._activeTokens.size,
+      activeTokens: this.marketScanner.count(),
       signals: { count: recs.length, sample: recs.slice(0, 3).map(r => ({ cid: r.cid, dir: r.dir, sz: r.sz, urg: r.urg })) },
       placements: {
         attempted: placementResults.length,

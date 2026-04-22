@@ -74,6 +74,29 @@ export const LIVE_CONFIG = {
     orderbookRefreshMs: num("BOOK_REFRESH_MS", 2000), // CLOB book cache TTL
   },
 
+  // ── Market scanner ──
+  marketScanner: {
+    maxActiveTokens: num("MAX_ACTIVE_TOKENS", 20),
+    defaultAdv: num("DEFAULT_ADV", 10000),
+    defaultTickSize: env("DEFAULT_TICK_SIZE", "0.01"),
+    minPrice: num("MIN_ORDER_PRICE", 0.01),
+    maxPrice: num("MAX_ORDER_PRICE", 0.99),
+  },
+
+  // ── Signal engine ──
+  signal: {
+    historyMaxLen: num("SIGNAL_HISTORY_MAX_LEN", 300),
+    defaultVolatility: num("SIGNAL_DEFAULT_VOLATILITY", 0.02),
+    defaultCategory: env("SIGNAL_DEFAULT_CATEGORY", "unknown"),
+    regimeMinPoints: num("SIGNAL_REGIME_MIN_POINTS", 30),
+  },
+
+  // ── Portfolio state mapping ──
+  portfolio: {
+    defaultCurrentDD: num("PORTFOLIO_DEFAULT_DD", 0),
+    defaultCbState: env("PORTFOLIO_DEFAULT_CB_STATE", "closed"),
+  },
+
   // ── Market filters ──
   filters: {
     // Only trade markets whose daily volume exceeds this
@@ -213,6 +236,22 @@ export function validateConfig(cfg = LIVE_CONFIG) {
   if (cfg.risk.maxOrderNotional <= 0) errors.push("maxOrderNotional must be > 0");
   if (cfg.risk.maxDailyLoss <= 0) errors.push("maxDailyLoss must be > 0");
   if (cfg.loop.tickIntervalMs < 500) errors.push("tickIntervalMs must be >= 500");
+  if (cfg.marketScanner.maxActiveTokens <= 0) errors.push("maxActiveTokens must be > 0");
+  if (!(cfg.marketScanner.minPrice > 0 && cfg.marketScanner.minPrice < 1)) {
+    errors.push("minPrice must be in (0,1)");
+  }
+  if (!(cfg.marketScanner.maxPrice > 0 && cfg.marketScanner.maxPrice < 1)) {
+    errors.push("maxPrice must be in (0,1)");
+  }
+  if (!(cfg.marketScanner.minPrice < cfg.marketScanner.maxPrice)) {
+    errors.push("minPrice must be less than maxPrice");
+  }
+  if (cfg.signal.historyMaxLen <= 0) errors.push("signal.historyMaxLen must be > 0");
+  if (cfg.signal.regimeMinPoints <= 0) errors.push("signal.regimeMinPoints must be > 0");
+  if (cfg.signal.defaultVolatility < 0) errors.push("signal.defaultVolatility must be >= 0");
+  if (!["closed", "half_open", "open"].includes(cfg.portfolio.defaultCbState)) {
+    errors.push("portfolio.defaultCbState must be closed, half_open, or open");
+  }
 
   if (errors.length > 0) {
     throw new Error("Invalid live config:\n  - " + errors.join("\n  - "));
