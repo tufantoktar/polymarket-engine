@@ -153,6 +153,32 @@ export const LIVE_CONFIG = {
     startupRecoveryEnabled: bool("STARTUP_RECOVERY_ENABLED", true),
   },
 
+  // ── State snapshot persistence (V5.6) ─────────────────────────────────
+  snapshot: {
+    // Disable to skip the whole snapshot writer
+    enabled: bool("SNAPSHOT_ENABLED", true),
+    // File on disk — rename-atomic writes; dir auto-created
+    filePath: env("SNAPSHOT_FILE", "./logs/runtime-snapshot.json"),
+    // How often to persist
+    intervalMs: num("SNAPSHOT_INTERVAL_MS", 10000),
+    // Load on startup (ignored if no file present)
+    loadOnStart: bool("SNAPSHOT_LOAD_ON_START", true),
+  },
+
+  // ── Alert thresholds (V5.6) ───────────────────────────────────────────
+  alerts: {
+    // Alert if we haven't had a fill in this long
+    noTradeAlertMs: num("ALERT_NO_TRADE_MS", 10 * 60 * 1000),
+    // Grace period for recovery before we alert about it
+    recoveryPendingGraceMs: num("ALERT_RECOVERY_GRACE_MS", 30000),
+    // Duplicate-signal count threshold
+    duplicateSignalThreshold: num("ALERT_DUP_SIGNAL_THRESHOLD", 20),
+    // Reconciliation-mismatch count threshold
+    reconcileMismatchThreshold: num("ALERT_RECONCILE_MISMATCH_THRESHOLD", 5),
+    // How long between repeat logs for the same active alert
+    cooldownMs: num("ALERT_COOLDOWN_MS", 5 * 60 * 1000),
+  },
+
   // ── Logging ──
   logging: {
     level: env("LOG_LEVEL", "info"),   // "debug" | "info" | "warn" | "error"

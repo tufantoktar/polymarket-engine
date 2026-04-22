@@ -43,6 +43,11 @@ import { HealthMonitor } from "./monitoring/health.js";
 import { runStartupRecovery } from "./sync/startupRecovery.js";
 import { syncPositions as reconcileWithExchange } from "./sync/reconciliation.js";
 
+// V5.6 reliability hardening
+import { Observability } from "./monitoring/observability.js";
+import { AlertEngine } from "./monitoring/alerts.js";
+import { SnapshotWriter, loadSnapshotFileSync, applySnapshot } from "./state/snapshot.js";
+
 export class EventLoop {
   constructor(cfg = LIVE_CONFIG) {
     this.cfg = cfg;
@@ -59,10 +64,16 @@ export class EventLoop {
       monitoring: cfg.monitoring || {},
     });
 
+    // V5.6: observability container — cheap counters & flags.
+    // Constructed before exec so we can inject it (exec records
+    // duplicate signals + fills into this).
+    this.observability = new Observability();
+
     this.exec = new LiveExecutionEngine({
       cfg, logger: this.log,
       client: this.client, wallet: this.wallet, risk: this.risk,
       killSwitch: this.killSwitch,
+      observability: this.observability,
     });
     this.signals = new LiveSignalEngine(cfg, this.log);
 
@@ -73,7 +84,11 @@ export class EventLoop {
       killSwitch: this.killSwitch,
       config: cfg,
     });
+    // V5.6: alert engine + snapshot writer
+    this.alerts = new AlertEngine({ logger: this.log, config: cfg });
+    this.snapshotWriter = null;   // constructed in init() if enabled
 
+    this._bootAt = Date.now();
     this._running = false;
     this._iterCount = 0;
     this._activeTokens = new Map();
@@ -95,6 +110,23 @@ export class EventLoop {
       this.log.info("Approvals verified");
     }
     this._registerSignalHandlers();
+
+    // V5.6: Load persisted snapshot BEFORE exchange recovery. Snapshot
+    // gives us a warm-resume of in-flight orders + positions from the
+    // last successful write; the subsequent exchange reconcile is the
+    // authority. On missing/corrupt file this just logs + continues.
+    if (this.cfg.snapshot?.enabled && this.cfg.snapshot?.loadOnStart) {
+      const snap = loadSnapshotFileSync(this.cfg.snapshot.filePath, this.log);
+      if (snap) {
+        const loadRes = applySnapshot(snap, {
+          orderStore: this.exec.orders,
+          positionStore: this.exec.positions,
+          signalDeduper: this.exec.deduper,
+          logger: this.log,
+        });
+        this.log.info("Snapshot loaded", loadRes);
+      }
+    }
 
     // V5.5: startup recovery must finish before any live trading.
     this.health.recordRecoveryStarted();
@@ -132,6 +164,30 @@ export class EventLoop {
       );
     }
 
+    // V5.6: kick off periodic snapshot writer AFTER recovery — so the
+    // first persisted file reflects a reconciled runtime, not a
+    // half-loaded one.
+    if (this.cfg.snapshot?.enabled) {
+      this.snapshotWriter = new SnapshotWriter({
+        filePath: this.cfg.snapshot.filePath,
+        intervalMs: this.cfg.snapshot.intervalMs,
+        sources: {
+          orderStore: this.exec.orders,
+          positionStore: this.exec.positions,
+          signalEngine: this.signals,
+          killSwitch: this.killSwitch,
+          observability: this.observability,
+          health: this.health,
+        },
+        logger: this.log,
+      });
+      this.snapshotWriter.start();
+      this.log.info("Snapshot writer started", {
+        path: this.cfg.snapshot.filePath,
+        intervalMs: this.cfg.snapshot.intervalMs,
+      });
+    }
+
     return true;
   }
 
@@ -144,6 +200,12 @@ export class EventLoop {
         await this.exec.cancelAllOrders();
       } catch (e) {
         this.log.errorEvent("shutdown:cancelAll", e);
+      }
+      // V5.6: flush snapshot so the next restart resumes at the most
+      // recent in-memory state rather than the last periodic write.
+      if (this.snapshotWriter) {
+        try { await this.snapshotWriter.flush(); } catch { /* already logged */ }
+        this.snapshotWriter.stop();
       }
       this._running = false;
       this.health.markStopped();
@@ -290,6 +352,7 @@ export class EventLoop {
     // In live mode, refuse to trade until recovery finished successfully.
     // Paper mode bypasses this since there's nothing to recover.
     if (this.cfg.mode === "live" && !this._recoveryDone) {
+      this.observability.setTradingBlocked("recovery_pending");
       this.log.warn("Recovery not complete; skipping live trading this tick", { iter });
       return;
     }
@@ -300,15 +363,20 @@ export class EventLoop {
       openOrders: this.exec.orders.listOpenOrders(),
     });
     if (ksReason) {
+      this.observability.setTradingBlocked(`kill_switch:${ksReason.trigger}`);
       this.log.warn("Kill switch active; skipping tick", { iter, reason: ksReason });
       // If this is the first tick after auto-trigger, cancel remote orders
       try { await this.exec.cancelAllOrders(); } catch (e) { this.log.errorEvent("kill:cancelAll", e); }
       return;
     }
     if (this.risk.isHalted()) {
+      this.observability.setTradingBlocked("risk_halted");
       this.log.warn("Risk engine halted; skipping tick", { iter });
       return;
     }
+
+    // Cleared all guards — trading is not blocked this tick.
+    this.observability.clearTradingBlocked();
 
     let recs = [];
     let placementResults = [];
@@ -379,6 +447,17 @@ export class EventLoop {
     }
     const healthSnap = this.health.getHealthStatus({ livePrices });
 
+    // V5.6: feed reconcile outcome into observability counters
+    if (reconcileSummary) this.observability.recordReconciliation(reconcileSummary);
+
+    // V5.6: evaluate alert rules now that observability is up to date
+    const obsSnap = this.observability.snapshot();
+    const activeAlerts = this.alerts.evaluate({
+      observability: obsSnap,
+      recovery: this.health._recoveryStatus,
+      bootAt: this._bootAt,
+    });
+
     this.log.decision("tick:summary", {
       iter,
       tsStart: start,
@@ -418,6 +497,12 @@ export class EventLoop {
         ordersCorrected: reconcileSummary.ordersCorrected,
         positionsCorrected: reconcileSummary.positionsCorrected,
       } : null,
+      // V5.6: operator-facing signals
+      observability: obsSnap,
+      alerts: {
+        active: activeAlerts,
+        activeCount: activeAlerts.length,
+      },
     });
   }
 

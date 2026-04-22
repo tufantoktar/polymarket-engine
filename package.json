@@ -1,7 +1,7 @@
 {
   "name": "polymarket-engine",
   "private": true,
-  "version": "5.5.0",
+  "version": "5.6.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -16,7 +16,8 @@
     "test:exec": "node scripts/testExecutionFlow.js",
     "test:live": "node scripts/testStateModules.js && node scripts/testExecutionFlow.js",
     "test:reliability": "node scripts/testReliabilityModules.js",
-    "test:all": "node scripts/testStateModules.js && node scripts/testExecutionFlow.js && node scripts/testReliabilityModules.js"
+    "test:all": "node scripts/testStateModules.js && node scripts/testExecutionFlow.js && node scripts/testReliabilityModules.js && node scripts/testHardeningModules.js",
+    "test:hardening": "node scripts/testHardeningModules.js"
   },
   "dependencies": {
     "react": "^18.3.1",

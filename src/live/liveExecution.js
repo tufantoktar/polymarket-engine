@@ -64,6 +64,10 @@ export class LiveExecutionEngine {
     // injected. liveExecution functions without it (paper tests etc.)
     // but will respect it when present.
     this.killSwitch = deps.killSwitch || null;
+
+    // V5.6: observability is optional; when injected we update it from
+    // the duplicate-signal and fill paths. No-op if null.
+    this.observability = deps.observability || null;
   }
 
   async init() {
@@ -111,11 +115,13 @@ export class LiveExecutionEngine {
     });
 
     if (this.deduper.has(signalKey)) {
+      this.observability?.recordDuplicateSignal();
       this.log.decision("placeOrder:duplicate_signal", { signalKey, reason: "dedupe_cache_hit" });
       return { success: false, reason: "duplicate_signal", signalKey };
     }
     if (this.orders.hasSignalKey(signalKey)) {
       const existing = this.orders.getBySignalKey(signalKey);
+      this.observability?.recordDuplicateSignal();
       this.log.decision("placeOrder:duplicate_order", { signalKey, orderId: existing?.orderId, state: existing?.state });
       return { success: false, reason: "duplicate_order", signalKey, orderId: existing?.orderId };
     }
@@ -316,6 +322,9 @@ export class LiveExecutionEngine {
     } else {
       this.killSwitch?.recordOrderProgress(orderId);
     }
+
+    // V5.6: observability — last trade timestamp
+    this.observability?.recordFill();
 
     this.log.trade("fill", {
       orderId,

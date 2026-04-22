@@ -1,5 +1,91 @@
 # Changelog
 
+## [5.6.0] — Phase 2 Reliability Hardening
+
+Minimal, additive reliability layer on top of V5.5. No architectural changes,
+no strategy changes, no engine rewrite. Priority was: restart safety >
+operator visibility > clean minimal code.
+
+### Added
+Three new modules, all isolated from strategy logic:
+
+- `src/live/state/snapshot.js` — lightweight periodic state persistence
+  - `buildSnapshot(sources)` — pure serializer from runtime stores
+  - `writeSnapshotFile(path, data)` — atomic tmp+rename, never throws, returns `{ok, bytes | error}`
+  - `loadSnapshotFileSync(path)` — tolerant of missing/empty/corrupt JSON + schema mismatch → returns `null`
+  - `applySnapshot(snap, stores)` — best-effort per-section restore; primes `SignalDeduper` so a just-restored order can't be duplicated by a fresh signal
+  - `SnapshotWriter` — interval-driven, `inFlight` guard prevents overlapping writes, `.unref()`'d timer, `flush()` for shutdown
+  - JSON schema: `{schemaVersion, savedAt, orders:{open, recentTerminal}, positions, lastSignals, flags}`
+
+- `src/live/monitoring/observability.js` — runtime flags for operators
+  - `tradingBlocked / tradingBlockedReason / tradingBlockedSince`
+  - `lastTradeTimestamp / noTradeDuration` (derived)
+  - `repeatedDuplicateSignals / reconcileMismatchCount` (cumulative)
+  - `lastDuplicateAt / lastReconcileAt / lastReconcileMismatchAt` breadcrumbs
+  - Idempotent mutators, tolerant of bad inputs — safe for hot paths
+
+- `src/live/monitoring/alerts.js` — operator warning conditions
+  - 4 rules: `no_trades`, `recovery_pending`, `duplicate_spam`, `reconcile_drift`
+  - De-dup: first activation always logs (state change), re-log only after `cooldownMs`
+  - Clearing is explicit and logged as `alert:<key>:cleared` (info)
+  - Active alert list + per-alert count + first/last fired timestamps
+  - All thresholds configurable, all env-overridable
+
+### Integration (minimal additive changes)
+- `config.js` — new `snapshot.*` and `alerts.*` sections, all env-overridable, backward compatible
+- `liveExecution.js` — accepts optional `observability` DI, calls `recordDuplicateSignal()` on dup paths, `recordFill()` on successful fills
+- `eventLoop.js`:
+  - Constructs `Observability + AlertEngine + SnapshotWriter`
+  - On boot: `loadSnapshotFileSync()` + `applySnapshot()` BEFORE exchange recovery (snapshot gives warm resume; recovery is authority)
+  - After boot reconcile: starts `SnapshotWriter.start()`
+  - Tick guards call `setTradingBlocked/clearTradingBlocked`
+  - Reconciliation summary feeds `observability.recordReconciliation()`
+  - `alerts.evaluate()` runs each tick
+  - `tick:summary` includes `observability` + `alerts.active`
+  - SIGINT/SIGTERM: `snapshotWriter.flush()` before exit
+
+### Config additions
+```
+snapshot.enabled                SNAPSHOT_ENABLED=true
+snapshot.filePath               SNAPSHOT_FILE=./logs/runtime-snapshot.json
+snapshot.intervalMs             SNAPSHOT_INTERVAL_MS=10000
+snapshot.loadOnStart            SNAPSHOT_LOAD_ON_START=true
+
+alerts.noTradeAlertMs           ALERT_NO_TRADE_MS=600000
+alerts.recoveryPendingGraceMs   ALERT_RECOVERY_GRACE_MS=30000
+alerts.duplicateSignalThreshold ALERT_DUP_SIGNAL_THRESHOLD=20
+alerts.reconcileMismatchThreshold ALERT_RECONCILE_MISMATCH_THRESHOLD=5
+alerts.cooldownMs               ALERT_COOLDOWN_MS=300000
+```
+
+### Validation
+- **72/72 new hardening tests pass** (`scripts/testHardeningModules.js`)
+  - snapshot: roundtrip, missing file, corrupt JSON, empty file, wrong schema, unexpected shape, write failure doesn't throw
+  - observability: all flag updates, counter increments, derived fields, defensive nulls
+  - alerts: each of the 4 triggers, cooldown suppresses re-log, cooldown expires, state-change re-fires within cooldown, clearing works
+  - SnapshotWriter: interval + flush + stats
+- **237 tests total** across V5.4+V5.5+V5.6 (64 state + 34 exec + 67 reliability + 72 hardening)
+- **Regression check**: all 165 pre-V5.6 tests still green
+- **End-to-end paper smoke**:
+  - Snapshot file written (672 bytes) every `intervalMs`
+  - `tick:summary` includes all 8 observability keys + alerts structure
+  - SIGTERM fires `killSwitch:triggered manual_api` + flushes snapshot
+- **Warm-resume round trip verified**: wrote fake snapshot with 1 open order + 1 position, started bot, confirmed `snapshot:applied ordersRestored:1 positionsRestored:1 dedupeKeysRestored:1`, `tick:summary` showed restored order + position
+
+### Assumptions
+- Exchange reconciliation remains the authority on order/position truth — snapshot is warm-resume optimization only
+- Snapshot rarely conflicts with reconcile (both flow into the same stores; later writes win)
+- Alert cooldown default 5 min is conservative; can tune via env
+- `HealthMonitor._recoveryStatus` is read directly by AlertEngine — tolerable given both are private runtime helpers
+
+### New npm scripts
+```
+npm run test:hardening     # 72 V5.6 hardening tests
+npm run test:all           # full suite: state + exec + reliability + hardening (237 tests)
+```
+
+---
+
 ## [5.5.0] — Production Reliability
 
 ### Added

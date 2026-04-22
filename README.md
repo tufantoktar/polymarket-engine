@@ -57,6 +57,19 @@ Open `http://localhost:5173` and click **START**.
 
 ## Version History
 
+### V5.6 — Phase 2 Reliability Hardening
+- Lightweight JSON snapshot persistence (atomic tmp+rename, never-throw load, SignalDeduper primed on restore)
+- Runtime observability flags: `tradingBlocked`, `lastTradeTimestamp`, `repeatedDuplicateSignals`, `reconcileMismatchCount`
+- 4 operator alerts with cooldown + state-change re-trigger: no_trades / recovery_pending / duplicate_spam / reconcile_drift
+- Warm-resume round trip verified: snapshot → restart → restored state visible in tick:summary
+- 72/72 new hardening tests pass (237 total across V5.4–V5.6)
+
+Quick test:
+```bash
+npm run test:hardening     # 72 new tests
+npm run test:all           # full 237-test suite
+```
+
 ### V5.5 — Production Reliability
 - New modules: `execution/slippage`, `monitoring/killSwitch`, `monitoring/health`, `sync/reconciliation`, `sync/startupRecovery`
 - Auto kill switch: daily loss, consecutive errors, API failure rate, stuck orders, manual `.KILL`
