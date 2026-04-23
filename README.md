@@ -1,1 +1,213 @@
-# polymarket-engine
+# Polymarket Trading Engine V4.3.1
+
+A deterministic, single-file quantitative trading engine simulator for prediction markets. Built as a React artifact with a pure functional engine core and a render-only UI layer.
+
+## What It Does
+
+Simulates a complete automated trading pipeline for Polymarket-style binary prediction markets:
+
+- **Signal Generation** — NLP (news sentiment), Momentum (technical indicators), Statistical Arbitrage (pair correlations)
+- **Meta-Alpha** — Learns from realized PnL to dynamically weight signal sources
+- **Risk Management** — Position limits, exposure caps, drawdown scaling, category caps, liquidity filters
+- **Order Execution** — 7-state FSM (NEW→ACCEPTED→PARTIALLY_FILLED→FILLED|CANCELLED|REJECTED|REPLACED)
+- **Partial Fill Handling** — RETRY / REPLACE / UNWIND / CANCEL with deterministic lineage
+- **Circuit Breaker** — 3-state FSM (closed→open→half_open) with 6 config-driven triggers
+- **Reconciliation** — Fill-based position rebuild every tick, drift detection and auto-correction
+- **Fill-Level Attribution** — Realized PnL attributed via actual fill→order→signal lineage
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────┐
+│  ENGINE (pure functions, no side effects)    │
+│                                             │
+│  Market Sim → Signals → Risk → Execution    │
+│  → Fills → Positions → Reconciliation       │
+│  → Circuit Breaker → MetaAlpha Attribution  │
+├─────────────────────────────────────────────┤
+│  UI (render-only, no state mutation)         │
+│                                             │
+│  Dashboard · Regime · Alpha · Execution     │
+│  · Risk · System · Tests                    │
+└─────────────────────────────────────────────┘
+```
+
+Single file: `src/App.jsx` — engine + UI in one file by design.
+
+## Quick Start
+
+```bash
+npm install
+npm run dev
+```
+
+Open `http://localhost:5173` and click **START**.
+
+## Tabs
+
+| Tab | Shows |
+|-----|-------|
+| **Dashboard** | Equity curve, markets, P&L, exposure |
+| **Regime** | Trend/vol/liquidity detection, meta-alpha weights |
+| **Alpha** | News feed, active signals, recommendations |
+| **Execution** | Order FSM states, child fills, partial actions |
+| **Risk** | Pre-trade risk verdicts, position ledger |
+| **System** | Reconciliation, CB triggers, events, counters |
+| **Tests** | 32 deterministic correctness tests |
+
+## Version History
+
+### V5.6 — Phase 2 Reliability Hardening
+- Lightweight JSON snapshot persistence (atomic tmp+rename, never-throw load, SignalDeduper primed on restore)
+- Runtime observability flags: `tradingBlocked`, `lastTradeTimestamp`, `repeatedDuplicateSignals`, `reconcileMismatchCount`
+- 4 operator alerts with cooldown + state-change re-trigger: no_trades / recovery_pending / duplicate_spam / reconcile_drift
+- Warm-resume round trip verified: snapshot → restart → restored state visible in tick:summary
+- 72/72 new hardening tests pass (237 total across V5.4–V5.6)
+
+Quick test:
+```bash
+npm run test:hardening     # 72 new tests
+npm run test:all           # full 237-test suite
+```
+
+### V5.5 — Production Reliability
+- New modules: `execution/slippage`, `monitoring/killSwitch`, `monitoring/health`, `sync/reconciliation`, `sync/startupRecovery`
+- Auto kill switch: daily loss, consecutive errors, API failure rate, stuck orders, manual `.KILL`
+- Startup recovery blocks live trading until exchange state is restored
+- Periodic reconciliation (every 30s default) with exchange as source of truth
+- Pre-trade slippage + liquidity guard via orderbook walk
+- Health snapshot embedded in every `tick:summary` log entry
+- 67/67 new reliability tests pass (165 tests total: state + exec + reliability)
+
+Quick test:
+```bash
+npm run test:reliability    # 67 new tests
+npm run test:all            # full V5.4 + V5.5 suite
+```
+
+### V5.4 — State Module Extraction & Execution Hardening
+- New `src/live/state/` modules: `orderStateMachine`, `orderStore`, `positionStore`, `signalDeduper`
+- Strict order FSM with explicit transitions (IDLE → SIGNAL_DETECTED → ORDER_PLACED → PARTIAL_FILL → FILLED/CANCELLED/FAILED)
+- In-memory order registry with three indexes, duplicate detection, atomic transitions
+- Position store with weighted avg entry and realized PnL tracking
+- Signal deduper with deterministic keys + LRU + TTL (prevents duplicate orders from same signal)
+- `liveExecution.js` + `eventLoop.js` refactored to use state modules (no ad-hoc Maps)
+- Every tick emits structured `tick:summary` JSONL with full state snapshot
+- 98/98 new tests pass (64 state module + 34 execution flow)
+
+Quick test:
+```bash
+node scripts/testStateModules.js       # 64 unit tests
+node scripts/testExecutionFlow.js      # 34 integration tests
+```
+
+### V5.3 — Live Trading Integration
+- Real Polymarket CLOB integration via `@polymarket/clob-client`
+- Paper + live mode via `TRADING_MODE` env var (paper is dependency-free)
+- Wallet (ethers), USDC balance, CTF positions, auto-approvals
+- Event loop with 5s ticks, kill switch, graceful shutdown
+- Daily-loss stop, concurrent-order cap, slippage tolerance, emergency stop
+- Structured JSONL logs + CLI trade-history viewer
+
+Quick start:
+```bash
+npm run live:paper       # paper mode, no credentials needed
+npm run install:live     # add CLOB SDK + ethers
+npm run live             # live mode (requires PRIVATE_KEY env)
+npm run trades           # view trade log
+```
+
+See `config-examples/.env.example` for every parameter.
+
+### V5.2 — Phase 2 Modular Extraction
+- Extracted execution, risk, portfolio, system, tick from App.jsx into `src/engine/*`
+- Extracted 52-test suite into `src/tests/runTests.js`
+- App.jsx reduced to 276 lines (orchestration + UI only, zero business logic)
+- 52/52 tests pass · 100-tick replay byte-identical to V5.1
+
+### V5.1 — Phase 1 Modular Refactor
+- Extracted pure/low-risk modules: config, math, prng, history, regime, market, alpha
+- Zero behavior change: 52/52 tests pass, determinism verified
+- Reserved for Phase 2: execution, risk, portfolio, reconcile, CB, event log, metrics, state+tick, UI
+
+### V5.0 — Market-Realistic Alpha-Driven Engine
+- **Phase 1**: Real LOB with FIFO matching, no random fills
+- **Phase 2**: √(qty/ADV) impact model, adverse selection, dynamic spreads
+- **Phase 3**: Orderflow imbalance, cointegration arb, multi-TF momentum, latency-penalized NLP
+- **Phase 4**: Correlation matrix, vol-targeted sizing, regime-capped Kelly, correlated exposure check
+- **Phase 5**: Adaptive limits from LOB, TWAP scheduling, cancel/replace on drift
+- **Phase 6**: Append-only event log (ORDER/FILL/NEWS), bounded, replayable
+- **Phase 7**: Sharpe, win rate, avg slippage, exec quality, alpha contribution per source
+
+### V4.3.2 — Correctness + Clarity Patch
+- Half-open CB cap now true NOTIONAL (converted to qty via side price)
+- Half-open probe accounting uses real fill notional (qty × price)
+- Sizing from live state: equity, DD, remaining notional/position/category room
+- Pruning rewritten: flat-array return, transitive lineage closure, bounded iteration
+- Risk clarity: explicit names (requestedQty/allowedQty/sidePrice/additionalNotional)
+- Attribution hardened against null/array/NaN/Infinity attr
+- 12 new tests (115 total, all passing)
+
+### V4.3.1 — Meta-Alpha Attribution Correctness
+- Fill-level source lineage (`fill.attr` from originating order)
+- Realized PnL attributed per-fill via actual lineage
+- Removed "most recent order in market" .pop() bug
+- Partial close attribution (only closing portion attributed)
+- `applyAttributionEvents` is pure and deterministic
+- No unrealized PnL learning, no fill-quality proxy learning
+- 9 new attribution tests (Tests 24-32)
+
+### V4.3 — Correctness + Determinism + Lifecycle Hardening
+- Terminal state immutability (FILLED/CANCELLED/REJECTED/REPLACED)
+- Deterministic order IDs with tick-local sequence counter
+- Child-level fill key dedup
+- Pure circuit breaker functions (no mutation)
+- Windowed reject tracking (was unbounded counter)
+- Poor fill evaluation timing fix
+- Spawn depth/count enforcement, deferred spawn dedup
+- History pruning with transitive lineage protection
+
+### V4.2 — Circuit Breaker + Risk + Exposure Consistency
+- Full 3-state CB FSM with 6 triggers
+- Notional vs quantity exposure separation
+- Windowed slippage/poor fill/invalid data tracking
+- Poor fills and invalid market data now actually trip CB
+
+## Determinism Guarantees
+
+Same `seed` + same `tickTime` + same event sequence = identical output.
+
+- PRNG: seeded, deterministic per tick
+- Order IDs: tick-local sequence counter
+- Fill timestamps: injected `tickTime` only
+- Attribution: pure `(metaPerf, attrEvents) → metaPerf`
+- No hidden mutation, no wall-clock dependencies in engine
+
+## Tests
+
+Click the **Tests** tab to run 32 deterministic tests covering:
+
+- Order lifecycle FSM transitions
+- Partial fill actions (retry/replace/unwind/cancel)
+- Duplicate fill rejection
+- Position + PnL rebuild from fills
+- Reconciliation consistency
+- Circuit breaker triggers + recovery
+- Fill-level attribution correctness
+- Partial close attribution
+- Deterministic replay verification
+
+## Tech Stack
+
+- React 18 + Vite
+- Zero external dependencies (engine is pure JS)
+- Tailwind-free: all styles are inline objects
+- Monospace: JetBrains Mono / Fira Code
+
+## License
+
+MIT
+
+## Disclaimer
+
+This is a simulation engine for educational and research purposes. It does not execute real trades, connect to real markets, or provide financial advice.

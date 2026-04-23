@@ -27,8 +27,8 @@
 //  the loop. Errors route to errors.jsonl.
 // ═══════════════════════════════════════════════════════════════════════
 
-import { LIVE_CONFIG } from "./config.js";
-import { getLogger } from "./logger.js";
+import { LIVE_CONFIG } from "./config/index.js";
+import { getLogger } from "./logging/index.js";
 import { PolymarketClient } from "./polymarketClient.js";
 import { Wallet } from "./wallet.js";
 import { LiveRiskEngine } from "./risk_engine/index.js";
