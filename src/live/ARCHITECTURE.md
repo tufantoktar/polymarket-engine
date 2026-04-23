@@ -1,11 +1,148 @@
-# Live Engine Architecture (Phase 2.1)
+# Live Engine Architecture
 
-## Purpose
-`src/live/` contains the production live trading runtime for Polymarket.
-It is responsible for orchestration, signal generation, risk gates, execution, monitoring, reconciliation, startup recovery, and runtime state persistence.
+## 1. Overview
 
-## Canonical Entrypoints
-The following modules are canonical entrypoints for internal runtime imports:
+`src/live/` is the modular runtime for continuous Polymarket trading operations.
+
+It supports two execution modes:
+
+- **Paper mode**: runs the same runtime pipeline but does not submit real exchange orders.
+- **Live mode**: runs against real Polymarket infrastructure and may submit real orders.
+
+`eventLoop.js` is the top-level orchestrator. It coordinates module calls, lifecycle, guards, and scheduling. It should not own strategy/business logic.
+
+## 2. High-Level Flow
+
+```text
+EventLoop
+  -> MarketScanner
+  -> SignalEngine
+  -> PortfolioState
+  -> RiskEngine
+  -> ExecutionEngine
+  -> State Stores
+  -> Monitoring / KillSwitch / Observability
+  -> Logging / Snapshot
+```
+
+Runtime flow per tick is controlled by EventLoop and composed from module interfaces.
+
+## 3. Module Ownership
+
+- `config/`:
+  - Runtime config defaults + env mapping
+  - Validation
+  - Kill-switch sentinel checks
+
+- `logging/`:
+  - Structured JSONL logging
+  - Decision/trade/error channels
+
+- `execution_engine/`:
+  - Order lifecycle execution surface
+  - Order FSM transitions via state modules
+  - Placement, cancel, status refresh, fill application
+
+- `risk_engine/`:
+  - Trading limits
+  - Session/day-level risk tracking
+  - Halt logic and risk rejections
+
+- `signal_engine/`:
+  - Ingest normalized market data
+  - Generate recommendations from engine signals
+
+- `market_scanner/`:
+  - Discover tradable markets/tokens
+  - Pull orderbooks
+  - Map recommendations into order requests
+
+- `portfolio_state/`:
+  - Build live portfolio state snapshot used by signal generation
+
+- `monitoring/`:
+  - Kill switch triggers and halt state
+  - Health snapshots
+  - Observability counters/flags
+  - Operator alerts
+
+- `state/`:
+  - `orderStore`
+  - `positionStore`
+  - `signalDeduper`
+  - `snapshot` persistence helpers
+  - `orderStateMachine` for explicit transitions
+
+- `sync/`:
+  - Startup recovery
+  - Periodic reconciliation against exchange truth
+
+## 4. EventLoop Responsibilities
+
+EventLoop responsibilities:
+
+- orchestration only
+- lifecycle coordination
+- scheduling and guard checks
+- cross-module wiring
+
+EventLoop non-responsibilities:
+
+- no embedded order execution logic
+- no embedded risk rule implementation
+- no direct state mutation bypassing module interfaces
+
+Tick lifecycle (simplified):
+
+1. Evaluate startup/recovery state.
+2. Evaluate kill-switch and risk guards.
+3. Run periodic reconciliation when due.
+4. Refresh active tradable tokens.
+5. Ingest orderbook data.
+6. Run execution housekeeping (stale orders, sync cadence).
+7. Build live portfolio state.
+8. Generate signal recommendations.
+9. Convert recommendations to orders and send through execution engine.
+10. Emit summary/health/observability logs and snapshots.
+
+## 5. Data Flow
+
+```text
+Market Data (Gamma/CLOB)
+  -> MarketScanner (token + book ingest)
+  -> SignalEngine (recommendations)
+  -> ExecutionEngine (order intents -> order lifecycle)
+  -> Fills / Status Updates
+  -> PositionStore + OrderStore
+  -> Risk + Health + Observability metrics
+  -> Logs + Snapshot persistence
+```
+
+Primary state movement:
+
+- market data -> signals
+- signals -> order requests
+- order requests -> order state transitions
+- fills -> positions + realized metrics
+- state + metrics -> monitoring + logs
+
+## 6. Compatibility Adapters
+
+The following files exist only for backward compatibility:
+
+- `src/live/config.js`
+- `src/live/logger.js`
+- `src/live/liveExecution.js`
+- `src/live/liveRisk.js`
+- `src/live/liveSignals.js`
+
+These are **temporary compatibility adapters**.
+
+Internal runtime code should treat them as legacy shims, not primary dependencies.
+
+## 7. Import Rules (Mandatory)
+
+Internal imports must use canonical module entrypoints, for example:
 
 - `src/live/config/index.js`
 - `src/live/logging/index.js`
@@ -15,21 +152,9 @@ The following modules are canonical entrypoints for internal runtime imports:
 - `src/live/market_scanner/index.js`
 - `src/live/portfolio_state/index.js`
 
-## Module Ownership
-- `config/index.js`: live runtime configuration, env parsing, validation, kill-switch file/env check.
-- `logging/index.js`: structured logging surface used by runtime modules.
-- `eventLoop.js`: orchestration layer for tick lifecycle and runtime coordination.
-- `execution_engine/index.js`: order lifecycle, placement/cancel/status, fills, dedupe integration.
-- `risk_engine/index.js`: pre-trade and session risk controls.
-- `signal_engine/index.js`: market-data ingestion and recommendation generation.
-- `market_scanner/index.js`: tradable token discovery, book ingestion, recommendation-to-order mapping.
-- `portfolio_state/index.js`: live portfolio snapshot assembly for signal engine input.
-- `monitoring/*`: kill switch, health, observability, alerting.
-- `sync/*`: startup recovery and periodic reconciliation.
-- `state/*`: runtime state stores and state-machine primitives.
+Do not import adapter files from internal runtime code or runtime scripts.
 
-## Compatibility Adapters (Intentional)
-The following files are compatibility adapters and remain intentionally for backward compatibility:
+Disallowed internal targets:
 
 - `src/live/config.js`
 - `src/live/logger.js`
@@ -37,34 +162,10 @@ The following files are compatibility adapters and remain intentionally for back
 - `src/live/liveRisk.js`
 - `src/live/liveSignals.js`
 
-These files are not canonical internal dependencies.
+## 8. Design Principles
 
-## Import Rule
-Internal runtime code (`src/live/**`) and runtime scripts (`scripts/**`) must import canonical entrypoints, not adapter files.
-
-Allowed (canonical):
-- `from "./config/index.js"`
-- `from "./logging/index.js"`
-- `from "./execution_engine/index.js"`
-- `from "./risk_engine/index.js"`
-
-Disallowed (adapter path usage in internal code):
-- `from "./config.js"`
-- `from "./logger.js"`
-- `from "./liveExecution.js"`
-- `from "./liveRisk.js"`
-- `from "./liveSignals.js"`
-
-## Adapter Deprecation Note
-Adapters remain in place for a safe rollout window to avoid breaking external integrations.
-After one stable release cycle with no adapter usage in internal code, adapters can be scheduled for removal.
-
-## Event Loop Runtime Flow
-`eventLoop.js` orchestrates the runtime in this order:
-
-1. Initialize execution engine and approvals (mode-dependent).
-2. Load snapshot (if enabled) and run startup recovery.
-3. Optionally run initial reconciliation.
-4. Start continuous ticks.
-5. Per tick: evaluate kill-switch/risk guards, run scheduled reconciliation, refresh markets, ingest orderbooks, run housekeeping, build live state, generate recommendations, place orders via execution engine, emit health and decision summaries.
-6. On shutdown signals: trigger halt path, cancel open orders, flush snapshot writer, and stop cleanly.
+- **Modular boundaries**: each module has a clear ownership surface.
+- **Deterministic where possible**: avoid hidden mutation and implicit side effects.
+- **Explicit state transitions**: order lifecycle changes go through FSM/state modules.
+- **Observability-first**: decisions, errors, health, and alerts are first-class outputs.
+- **Safety-first**: risk limits, kill switch, recovery, and reconciliation are core runtime controls.
