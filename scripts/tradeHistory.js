@@ -13,7 +13,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { LIVE_CONFIG } from "../src/live/config.js";
+import { LIVE_CONFIG } from "../src/live/config/index.js";
 
 const args = process.argv.slice(2);
 const parseArg = (name, def) => {

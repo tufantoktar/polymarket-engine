@@ -20,7 +20,7 @@
 //  exchange. liveExecution + eventLoop consult it before acting.
 // ═══════════════════════════════════════════════════════════════════════
 
-import { isKillSwitchActive } from "../config.js";
+import { isKillSwitchActive } from "../config/index.js";
 import { ORDER_STATES, isTerminalState } from "../state/orderStateMachine.js";
 
 /** Default thresholds; overridable via config.monitoring. */

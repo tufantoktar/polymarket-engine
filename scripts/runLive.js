@@ -16,9 +16,9 @@
 //    LOG_LEVEL=debug|info|warn|error
 // ═══════════════════════════════════════════════════════════════════════
 
-import { LIVE_CONFIG, validateConfig } from "../src/live/config.js";
+import { LIVE_CONFIG, validateConfig } from "../src/live/config/index.js";
 import { EventLoop } from "../src/live/eventLoop.js";
-import { getLogger } from "../src/live/logger.js";
+import { getLogger } from "../src/live/logging/index.js";
 
 async function main() {
   const log = getLogger(LIVE_CONFIG);

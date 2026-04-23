@@ -6,9 +6,9 @@
 //  synthetic orderbooks and accepts all orders.
 // ═══════════════════════════════════════════════════════════════════════
 
-import { LIVE_CONFIG } from "../src/live/config.js";
-import { LiveExecutionEngine } from "../src/live/liveExecution.js";
-import { getLogger } from "../src/live/logger.js";
+import { LIVE_CONFIG } from "../src/live/config/index.js";
+import { LiveExecutionEngine } from "../src/live/execution_engine/index.js";
+import { getLogger } from "../src/live/logging/index.js";
 import { ORDER_STATES } from "../src/live/state/orderStateMachine.js";
 
 const results = [];

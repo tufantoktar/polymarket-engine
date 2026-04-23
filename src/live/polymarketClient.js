@@ -16,8 +16,8 @@
 //    network path with zero financial risk.
 // ═══════════════════════════════════════════════════════════════════════
 
-import { LIVE_CONFIG } from "./config.js";
-import { getLogger } from "./logger.js";
+import { LIVE_CONFIG } from "./config/index.js";
+import { getLogger } from "./logging/index.js";
 import { withRetry, sleep } from "./retry.js";
 
 /**

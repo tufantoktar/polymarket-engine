@@ -2,8 +2,8 @@
 //  src/live/retry.js — exponential backoff + jitter
 // ═══════════════════════════════════════════════════════════════════════
 
-import { LIVE_CONFIG } from "./config.js";
-import { getLogger } from "./logger.js";
+import { LIVE_CONFIG } from "./config/index.js";
+import { getLogger } from "./logging/index.js";
 
 /**
  * Classify errors into retryable vs non-retryable.

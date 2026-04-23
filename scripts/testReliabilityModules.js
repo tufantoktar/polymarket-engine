@@ -24,7 +24,7 @@ import { SignalDeduper } from "../src/live/state/signalDeduper.js";
 import { ORDER_STATES } from "../src/live/state/orderStateMachine.js";
 import { syncPositions } from "../src/live/sync/reconciliation.js";
 import { runStartupRecovery } from "../src/live/sync/startupRecovery.js";
-import { LIVE_CONFIG } from "../src/live/config.js";
+import { LIVE_CONFIG } from "../src/live/config/index.js";
 
 const results = [];
 const assert = (name, cond, detail = "") => {
