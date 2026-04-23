@@ -12,6 +12,7 @@
     "trades": "node scripts/tradeHistory.js",
     "trades:all": "node scripts/tradeHistory.js --all",
     "install:live": "npm install @polymarket/clob-client ethers@5",
+    "check:live-imports": "node scripts/checkLiveImports.js",
     "test:state": "node scripts/testStateModules.js",
     "test:exec": "node scripts/testExecutionFlow.js",
     "test:live": "node scripts/testStateModules.js && node scripts/testExecutionFlow.js",
