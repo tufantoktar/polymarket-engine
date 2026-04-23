@@ -1,0 +1,34 @@
+{
+  "name": "polymarket-engine",
+  "private": true,
+  "version": "5.6.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "live:paper": "TRADING_MODE=paper node scripts/runLive.js",
+    "live": "TRADING_MODE=live node scripts/runLive.js",
+    "trades": "node scripts/tradeHistory.js",
+    "trades:all": "node scripts/tradeHistory.js --all",
+    "install:live": "npm install @polymarket/clob-client ethers@5",
+    "test:state": "node scripts/testStateModules.js",
+    "test:exec": "node scripts/testExecutionFlow.js",
+    "test:live": "node scripts/testStateModules.js && node scripts/testExecutionFlow.js",
+    "test:reliability": "node scripts/testReliabilityModules.js",
+    "test:all": "node scripts/testStateModules.js && node scripts/testExecutionFlow.js && node scripts/testReliabilityModules.js && node scripts/testHardeningModules.js",
+    "test:hardening": "node scripts/testHardeningModules.js"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "optionalDependencies": {
+    "@polymarket/clob-client": "^5.8.0",
+    "ethers": "^5.8.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^6.0.0"
+  }
+}

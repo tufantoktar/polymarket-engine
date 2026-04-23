@@ -1,0 +1,16 @@
+node_modules
+dist
+.vite
+*.local
+.DS_Store
+
+# Runtime logs — live trading writes here, never commit
+logs/
+*.log
+*.jsonl
+
+# Secrets — NEVER commit
+.env
+.env.local
+.env.*.local
+.KILL

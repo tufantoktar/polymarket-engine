@@ -1,5 +1,5 @@
-import { LIVE_CONFIG } from "../config.js";
-import { getLogger } from "../logger.js";
+import { LIVE_CONFIG } from "../config/index.js";
+import { getLogger } from "../logging/index.js";
 import { pushHist } from "../../engine/history.js";
 import { detectRegime, computeWeights } from "../../engine/regime.js";
 import { momSigs, orderflowSigs, processSigs } from "../../engine/alpha.js";
