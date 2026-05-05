@@ -25,6 +25,17 @@ export const POLYGON_ADDRESSES = {
   negRiskAdapter: "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296",
 };
 
+/**
+ * Resolve the collateral token address used for approvals.
+ * V2 lets you override via COLLATERAL_TOKEN_ADDRESS (e.g. native USDC vs
+ * USDC.e or pUSD). If unset we fall back to the existing USDC.e default.
+ */
+export function resolveCollateralAddress(cfg) {
+  return (cfg?.collateral?.tokenAddress && cfg.collateral.tokenAddress.trim())
+    ? cfg.collateral.tokenAddress.trim()
+    : POLYGON_ADDRESSES.usdcE;
+}
+
 // Minimal ERC20 ABI
 const ERC20_ABI = [
   "function balanceOf(address owner) view returns (uint256)",
@@ -78,9 +89,15 @@ export class Wallet {
     const providerUrl = process.env.RPC_URL || "https://polygon-rpc.com";
     this._provider = new ethers.providers.JsonRpcProvider(providerUrl, this.cfg.clob.chainId);
     this._wallet = new ethers.Wallet(this.cfg.clob.privateKey, this._provider);
-    this._usdc = new ethers.Contract(POLYGON_ADDRESSES.usdcE, ERC20_ABI, this._wallet);
+    const collateralAddr = resolveCollateralAddress(this.cfg);
+    this._usdc = new ethers.Contract(collateralAddr, ERC20_ABI, this._wallet);
     this._ctf = new ethers.Contract(POLYGON_ADDRESSES.ctf, ERC1155_ABI, this._wallet);
-    this.log.info("Wallet initialized", { address: this._wallet.address });
+    this.log.info("Wallet initialized", {
+      address: this._wallet.address,
+      chainId: this.cfg.clob.chainId,
+      collateralAddress: collateralAddr,
+      clobVersion: this.cfg.clob.version,
+    });
   }
 
   /** Return the wallet's public address (or paper stub). */

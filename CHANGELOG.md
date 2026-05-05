@@ -1,5 +1,78 @@
 # Changelog
 
+## [5.7.0] — Phase 1 Polymarket CLOB V2 Migration
+
+Compatibility-only migration of the live trading integration from
+Polymarket CLOB V1 to CLOB V2. **No strategy logic, risk semantics, or
+runtime architecture changed.** The V2 SDK is loaded lazily so paper
+mode keeps zero hard dependency on it.
+
+### Added
+- `src/live/execution/v2OrderBuilder.js` — pure, testable V2 order
+  payload builder (`buildV2OrderPayload`, `computeV2Amounts`,
+  `sanitizeOrderForLog`). Maps `(price, size, side)` to V2 base-unit
+  `makerAmount`/`takerAmount` deterministically. Rejects invalid input
+  before the SDK is touched.
+- `src/live/config/index.js` — new `runLivePreflight()` gate. Live mode
+  fails fast on missing V2 SDK, missing `PRIVATE_KEY`, kill switch
+  active, `ENABLE_LIVE_TRADING != true`, V1 selected, missing funder for
+  non-EOA, malformed builder address, and missing collateral wrap config
+  when wrap is enabled.
+- New env vars: `ENABLE_LIVE_TRADING`, `POLYMARKET_CLOB_VERSION`,
+  `POLYMARKET_CHAIN`, `BUILDER_ADDRESS`, `ENABLE_COLLATERAL_WRAP`,
+  `COLLATERAL_TOKEN_ADDRESS`, `COLLATERAL_ONRAMP_ADDRESS`. Surfaced in
+  `config-examples/.env.example`.
+- `scripts/testV2Migration.js` — 67 unit tests covering preflight,
+  payload determinism, BUY/SELL mapping, input rejection, no-secret
+  logging, and live mode failure when the V2 SDK is absent or when V1
+  is configured. Wired into `npm run test:v2` and `npm run test:all`.
+
+### Changed
+- `package.json` bump to `5.7.0`. `optionalDependencies` swapped from
+  `@polymarket/clob-client` → `@polymarket/clob-client-v2`. The
+  `install:live` script now installs `@polymarket/clob-client-v2`.
+- `src/live/polymarketClient.js` — refactored to use the V2 SDK behind
+  the same public surface (`placeOrder`, `cancelOrder`,
+  `cancelAllOrders`, `getOpenOrders`, `getOrderStatus`, `getFills`).
+  V2 SDK is imported lazily via the centralized `V2_PACKAGE` constant.
+  Order intent is built via `buildV2OrderPayload` and a sanitized intent
+  is logged before submission. Defensive ctor/method discovery handles
+  pre-1.0 V2 builds.
+- `src/live/wallet.js` — collateral token address is now resolved via
+  `resolveCollateralAddress(cfg)`, defaulting to the existing USDC.e
+  address. Initialization log now includes chain id, collateral
+  address, and CLOB version. ERC20 contract is bound against the
+  resolved collateral.
+- `scripts/runLive.js` — runs `runLivePreflight()` after
+  `validateConfig()` and exits 1 on any preflight error before the
+  event loop starts. Startup log now reports clob version and live
+  trading flag.
+- `README.md` and `docs/LIVE_RUNBOOK.md` — Phase 1 banner, V2 preflight
+  checklist, install + live run sequence, and explicit V1-fields-no-
+  longer-valid notice.
+
+### Not changed
+- Risk thresholds and risk gates (only added live-mode safety preflight).
+- Strategy logic, signal engine, market scanner, portfolio state.
+- Compatibility adapter files under `src/live/` (kept per phase scope).
+- Public module entrypoints under `src/live/*/index.js`.
+- Paper-mode behavior or dependencies. Paper mode still starts with no
+  private key and never imports the V2 SDK.
+
+### Known assumptions / follow-ups
+- The exact public surface of `@polymarket/clob-client-v2` was not
+  available at implementation time. The client wrapper resolves a few
+  alternative names (`ClobClient` / `ClobClientV2` / default,
+  `createOrDeriveApiCreds` / `createOrDeriveApiKey`,
+  `createAndPostOrder` / `createAndSubmitOrder`, `getOrder` /
+  `getOrderById`, `getFills` / `getTrades`) so the integration adapts
+  to small constructor or method renames in pre-1.0 V2 builds. This
+  should be re-checked once the V2 SDK is pinned.
+- Collateral wrap/onramp execution is intentionally not implemented;
+  this phase only adds the configuration surface and preflight gate.
+- Tests do not perform real network calls — V2 SDK absence is treated
+  as expected and asserted on.
+
 ## [5.6.0] — Phase 2 Reliability Hardening
 
 Minimal, additive reliability layer on top of V5.5. No architectural changes,

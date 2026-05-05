@@ -1,14 +1,42 @@
 # LIVE_RUNBOOK
 
+> **Phase 1 — CLOB V2 (V5.7+).** The live runtime targets Polymarket CLOB V2.
+> The runtime imports `@polymarket/clob-client-v2` lazily and refuses to enter
+> live mode without an explicit `ENABLE_LIVE_TRADING=true` opt-in plus a passing
+> preflight (chain, signature, key, V2 SDK presence, optional collateral wrap).
+> V1 fields like `nonce`, `feeRateBps`, and `taker` are no longer valid.
+
 ## 1. Quick Start (TL;DR)
 
 - `cp config-examples/.env.example .env`
-- Start safe first: `npm run live:paper`
+- Start safe first: `npm run live:paper` *(no key, no V2 SDK needed)*
 - Watch first 10-20 ticks in logs (`tick:summary`)
 - If healthy, set `TRADING_MODE=live` in `.env`
-- Install live deps if needed: `npm run install:live`
+- Set `ENABLE_LIVE_TRADING=true` (live mode refuses to start otherwise)
+- Set `POLYMARKET_CLOB_VERSION=v2` (default; Phase 1 only supports v2)
+- Install live deps: `npm run install:live`
 - Start live: `npm run live`
 - Keep kill switch ready: `touch .KILL`
+
+## 1.1 Preflight checklist (live mode only)
+
+The live runtime fast-fails on startup if any of these are missing or wrong:
+
+- `ENABLE_LIVE_TRADING=true`
+- `POLYMARKET_CLOB_VERSION=v2`
+- `PRIVATE_KEY` is set (never logged)
+- `SIGNATURE_TYPE` is one of `0`, `1`, `2`
+- `FUNDER_ADDRESS` is set when `SIGNATURE_TYPE != 0`
+- `BUILDER_ADDRESS` is either empty or a 0x-prefixed 20-byte address
+- Kill switch is not active (`.KILL` file absent and `KILL_SWITCH != 1`)
+- V2 SDK package `@polymarket/clob-client-v2` can be imported
+- If `ENABLE_COLLATERAL_WRAP=true`, both `COLLATERAL_TOKEN_ADDRESS` and
+  `COLLATERAL_ONRAMP_ADDRESS` must be set
+- Chain id is positive (Polygon mainnet = 137)
+
+When the preflight fails, errors are written to stderr and `errors.jsonl`
+under category `error`, and the process exits with code 1 before any
+network call to the exchange.
 
 ## 2. Common Scenarios
 
@@ -16,16 +44,21 @@
 
 - Symptom:
   - Process exits at startup
-  - Config validation errors
+  - Config validation or preflight errors
 - Possible cause:
   - Missing/invalid `.env` values
-  - Missing live dependencies in live mode
+  - Missing live dependencies in live mode (V2 SDK not installed)
+  - `ENABLE_LIVE_TRADING` not set to `true` while `TRADING_MODE=live`
+  - `POLYMARKET_CLOB_VERSION` is not `v2`
   - Invalid credential fields (`PRIVATE_KEY`, `FUNDER_ADDRESS` for signature type 1/2)
+  - Kill switch is active
 - Action steps:
   - Check startup stderr + `logs/errors.jsonl`
   - Re-copy baseline env: `cp config-examples/.env.example .env`
   - Run paper mode first: `npm run live:paper`
   - For live mode: run `npm run install:live` and validate credentials
+  - Confirm `ENABLE_LIVE_TRADING=true` and `POLYMARKET_CLOB_VERSION=v2`
+  - Verify the V2 SDK is installed: `node -e "import('@polymarket/clob-client-v2').then(m => console.log('ok'))"`
 
 ### B) No trades happening
 

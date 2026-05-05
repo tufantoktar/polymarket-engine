@@ -38,16 +38,17 @@ npm run live:paper
 
 - Can place **real orders with real funds**
 - Requires live credentials and careful risk configuration
-- Uses Polymarket CLOB + wallet integration
+- Uses Polymarket **CLOB V2** + wallet integration (Phase 1, V5.7+)
+- **Refuses to start unless `ENABLE_LIVE_TRADING=true` is explicitly set**
 
 Run:
 
 ```bash
-npm run install:live
+npm run install:live    # installs @polymarket/clob-client-v2 and ethers v5
 npm run live
 ```
 
-Before running live mode, configure `.env` from `config-examples/.env.example`.
+Before running live mode, configure `.env` from `config-examples/.env.example`. The runtime executes a fast preflight that fails if any of the following is wrong: `ENABLE_LIVE_TRADING` is not true, `POLYMARKET_CLOB_VERSION` is not `v2`, `PRIVATE_KEY` is missing, the kill switch is active, the V2 SDK can't load, or required collateral wrap config is missing while wrap is enabled.
 
 ## Architecture
 
@@ -154,8 +155,10 @@ Start with:
 
 High-impact configuration groups:
 
-- mode and kill switch (`TRADING_MODE`, `KILL_SWITCH`, `KILL_SWITCH_FILE`)
-- exchange and wallet (`PRIVATE_KEY`, `FUNDER_ADDRESS`, `SIGNATURE_TYPE`, CLOB credentials)
+- mode and kill switch (`TRADING_MODE`, `ENABLE_LIVE_TRADING`, `KILL_SWITCH`, `KILL_SWITCH_FILE`)
+- CLOB version selector (`POLYMARKET_CLOB_VERSION` — Phase 1 targets `v2`)
+- exchange and wallet (`PRIVATE_KEY`, `FUNDER_ADDRESS`, `SIGNATURE_TYPE`, `BUILDER_ADDRESS`, `POLYMARKET_CHAIN`/`CHAIN_ID`, CLOB credentials)
+- collateral / wrap (`ENABLE_COLLATERAL_WRAP`, `COLLATERAL_TOKEN_ADDRESS`, `COLLATERAL_ONRAMP_ADDRESS`)
 - risk limits (`MAX_ORDER_QTY`, `MAX_ORDER_NOTIONAL`, `MAX_POSITION_PER_MARKET`, `MAX_DAILY_LOSS`, etc.)
 - loop cadence (`TICK_INTERVAL_MS`, market/book refresh intervals)
 - reliability controls (recovery, reconciliation, monitoring, snapshot, alert thresholds)
@@ -186,6 +189,12 @@ This check blocks internal imports from reverting to compatibility adapter paths
 - Phase 2.1 governance guardrails are added:
   - architecture documentation
   - adapter-import regression check
+- **Phase 1 CLOB V2 migration (V5.7)**: live trading targets Polymarket CLOB V2
+  via `@polymarket/clob-client-v2`. V1 client/signature assumptions
+  (`nonce`/`feeRateBps`/`taker`) are no longer valid. V2 order construction
+  lives in a small, testable helper at `src/live/execution/v2OrderBuilder.js`
+  and is fully unit-covered (`npm run test:v2`). Live mode requires explicit
+  `ENABLE_LIVE_TRADING=true` and a passing preflight before any orders flow.
 - Compatibility adapters remain intentionally for safe rollout and backward compatibility:
   - `src/live/config.js`
   - `src/live/logger.js`
@@ -195,8 +204,11 @@ This check blocks internal imports from reverting to compatibility adapter paths
 
 ## Safety and Disclaimer
 
-- **Paper mode** is for testing/research and does not execute real orders.
-- **Live mode** may place real orders on Polymarket and can result in financial loss.
+- **Paper mode** is safe and does not place real orders. It does not require a private key.
+- **Live mode** may place real orders on Polymarket CLOB V2 and **can lose money**.
+- Live mode is gated by `ENABLE_LIVE_TRADING=true`; the runtime refuses to start otherwise.
+- V2 collateral/wrap configuration must be checked before live use. Funds are never auto-wrapped unless `ENABLE_COLLATERAL_WRAP=true`.
+- Phase 1 targets CLOB V2 only. **V1 client/signature assumptions (nonce / feeRateBps / taker) are no longer valid.**
 - This repository is provided for engineering/research purposes and is **not financial advice**.
 - You are responsible for secure credential handling, environment configuration, risk limits, and runtime supervision.
 

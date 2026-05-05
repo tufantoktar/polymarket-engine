@@ -37,14 +37,20 @@ function bool(k, def) {
 export const LIVE_CONFIG = {
   // ── Mode ──
   mode: env("TRADING_MODE", "paper"),   // "paper" | "live"
+  // Phase 1 V2: live trading is gated by an explicit opt-in flag.
+  // Even if TRADING_MODE=live, the runtime refuses to place real orders
+  // unless ENABLE_LIVE_TRADING=true is set.
+  enableLiveTrading: bool("ENABLE_LIVE_TRADING", false),
   killSwitchEnabled: bool("KILL_SWITCH", false),
   killSwitchFile: env("KILL_SWITCH_FILE", ".KILL"),
 
   // ── Polymarket CLOB ──
   clob: {
+    // V1/V2 SDK selector. Phase 1 targets CLOB V2.
+    version: env("POLYMARKET_CLOB_VERSION", "v2").toLowerCase(),
     host: env("CLOB_HOST", "https://clob.polymarket.com"),
     gammaHost: env("GAMMA_HOST", "https://gamma-api.polymarket.com"),
-    chainId: num("CHAIN_ID", 137),                           // Polygon mainnet
+    chainId: num("CHAIN_ID", num("POLYMARKET_CHAIN", 137)),  // Polygon mainnet
     // Signature type:
     //   0 = EOA (direct private key)
     //   1 = Email/Magic proxy
@@ -58,6 +64,23 @@ export const LIVE_CONFIG = {
     apiKey: env("CLOB_API_KEY", null),
     apiSecret: env("CLOB_API_SECRET", null),
     apiPassphrase: env("CLOB_API_PASSPHRASE", null),
+    // Optional builder address for V2 order metadata. Empty string means
+    // no builder is attached. Format must be a 0x-prefixed address.
+    builderAddress: env("BUILDER_ADDRESS", ""),
+  },
+
+  // ── Collateral / pUSD / wrap (V2) ──────────────────────────────────────
+  // V2 introduces explicit collateral handling. The runtime never wraps
+  // real funds automatically unless ENABLE_COLLATERAL_WRAP is set true.
+  collateral: {
+    // Master switch — must be true to attempt any wrap/onramp action.
+    wrapEnabled: bool("ENABLE_COLLATERAL_WRAP", false),
+    // ERC20 collateral token address (USDC / USDC.e / pUSD).
+    // Optional — when missing, wrap operations are disabled and the
+    // preflight only fails if wrapEnabled=true.
+    tokenAddress: env("COLLATERAL_TOKEN_ADDRESS", ""),
+    // Address of the V2 onramp / wrap contract.
+    onrampAddress: env("COLLATERAL_ONRAMP_ADDRESS", ""),
   },
 
   // ── Retry / backoff ──
@@ -230,6 +253,9 @@ export function validateConfig(cfg = LIVE_CONFIG) {
     if (cfg.clob.signatureType !== 0 && !cfg.clob.funderAddress) {
       errors.push("non-EOA signature types require FUNDER_ADDRESS");
     }
+    if (cfg.clob.version && !["v1", "v2"].includes(cfg.clob.version)) {
+      errors.push(`POLYMARKET_CLOB_VERSION must be 'v1' or 'v2', got '${cfg.clob.version}'`);
+    }
   }
 
   if (cfg.risk.maxOrderQty <= 0) errors.push("maxOrderQty must be > 0");
@@ -267,4 +293,89 @@ export function isKillSwitchActive(cfg = LIVE_CONFIG) {
     if (fs.existsSync(p)) return true;
   } catch { /* ignore fs errors — better to continue than crash */ }
   return false;
+}
+
+/**
+ * runLivePreflight — Phase 1 V2 hardening gate.
+ *
+ * Live mode must fail FAST when the runtime is not safe for real orders.
+ * Paper mode is always allowed (returns ok=true with no checks).
+ *
+ * Returns { ok, errors }. Caller decides whether to throw or log+exit.
+ *
+ * Checks (live mode only):
+ *   - ENABLE_LIVE_TRADING must be explicitly true
+ *   - kill switch must NOT be active
+ *   - PRIVATE_KEY must be present
+ *   - chain/signature settings must be valid
+ *   - funder address must be present for non-EOA signature types
+ *   - POLYMARKET_CLOB_VERSION must be v2 (Phase 1 target)
+ *   - if collateral wrap is enabled, token + onramp addresses are required
+ *   - risk thresholds must be sane (delegated to validateConfig errors)
+ */
+export function runLivePreflight(cfg = LIVE_CONFIG) {
+  const errors = [];
+
+  if (cfg.mode !== "live") {
+    return { ok: true, errors, mode: cfg.mode };
+  }
+
+  // Hard live-trading opt-in. This is the most important guard.
+  if (!cfg.enableLiveTrading) {
+    errors.push(
+      "ENABLE_LIVE_TRADING is not true — refusing to enter live mode. " +
+      "Set ENABLE_LIVE_TRADING=true to opt in."
+    );
+  }
+
+  if (isKillSwitchActive(cfg)) {
+    errors.push("Kill switch is active — refusing to start live mode.");
+  }
+
+  if (!cfg.clob.privateKey) {
+    errors.push("Missing PRIVATE_KEY env var (required for live mode).");
+  }
+
+  if (![0, 1, 2].includes(cfg.clob.signatureType)) {
+    errors.push(
+      `SIGNATURE_TYPE must be 0, 1, or 2 — got '${cfg.clob.signatureType}'.`
+    );
+  }
+
+  if (cfg.clob.signatureType !== 0 && !cfg.clob.funderAddress) {
+    errors.push("FUNDER_ADDRESS is required for non-EOA signature types.");
+  }
+
+  if (cfg.clob.version !== "v2") {
+    errors.push(
+      `POLYMARKET_CLOB_VERSION must be 'v2' for Phase 1 — got '${cfg.clob.version}'.`
+    );
+  }
+
+  if (!Number.isFinite(cfg.clob.chainId) || cfg.clob.chainId <= 0) {
+    errors.push(`Invalid chain ID '${cfg.clob.chainId}'.`);
+  }
+
+  // Optional collateral wrap path. Only required if explicitly enabled.
+  if (cfg.collateral?.wrapEnabled) {
+    if (!cfg.collateral.tokenAddress) {
+      errors.push(
+        "ENABLE_COLLATERAL_WRAP=true requires COLLATERAL_TOKEN_ADDRESS."
+      );
+    }
+    if (!cfg.collateral.onrampAddress) {
+      errors.push(
+        "ENABLE_COLLATERAL_WRAP=true requires COLLATERAL_ONRAMP_ADDRESS."
+      );
+    }
+  }
+
+  // Builder must be a 0x-address shape if non-empty.
+  if (cfg.clob.builderAddress && !/^0x[a-fA-F0-9]{40}$/.test(cfg.clob.builderAddress)) {
+    errors.push(
+      `BUILDER_ADDRESS must be a 0x-prefixed 20-byte address, got '${cfg.clob.builderAddress}'.`
+    );
+  }
+
+  return { ok: errors.length === 0, errors, mode: cfg.mode };
 }
