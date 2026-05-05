@@ -25,13 +25,26 @@ The project supports both simulation-like paper execution and real exchange exec
 ### Paper mode
 
 - No private key required
-- Uses the live runtime flow with paper-safe execution responses
+- Does **not** require `ENABLE_LIVE_TRADING=true`
+- Does **not** require V2 collateral/wrap configuration
+- Does **not** require the V2 SDK (`@polymarket/clob-client-v2`) to be installed
+- Uses the live runtime flow with paper-safe, simulated execution responses
+- Every placement response is marked `paper:true` and `clobVersion:"v2"`
 - Best default for local validation, integration checks, and workflow testing
+- **Mandatory first validation step before any live test** (Phase 2)
 
 Run:
 
 ```bash
 npm run live:paper
+```
+
+Targeted paper-mode validation suites (added in Phase 2):
+
+```bash
+npm run test:paper:v2        # paper isolation against the V2 path
+npm run test:paper:runtime   # bounded EventLoop tick validator
+npm run test:paper           # both, in sequence
 ```
 
 ### Live mode
@@ -189,12 +202,23 @@ This check blocks internal imports from reverting to compatibility adapter paths
 - Phase 2.1 governance guardrails are added:
   - architecture documentation
   - adapter-import regression check
-- **Phase 1 CLOB V2 migration (V5.7)**: live trading targets Polymarket CLOB V2
-  via `@polymarket/clob-client-v2`. V1 client/signature assumptions
+- **Phase 1 CLOB V2 migration (V5.7.0)**: live trading targets Polymarket
+  CLOB V2 via `@polymarket/clob-client-v2`. V1 client/signature assumptions
   (`nonce`/`feeRateBps`/`taker`) are no longer valid. V2 order construction
   lives in a small, testable helper at `src/live/execution/v2OrderBuilder.js`
   and is fully unit-covered (`npm run test:v2`). Live mode requires explicit
   `ENABLE_LIVE_TRADING=true` and a passing preflight before any orders flow.
+- **Phase 2 paper mode V2 validation (V5.7.1)**: validation/test/doc
+  hardening proving the V2 migration didn't break paper mode. Paper
+  mode is provably isolated from the V2 live path: `PolymarketClient`
+  in paper never instantiates the V2 client, `LiveExecutionEngine`
+  round-trips paper orders through the FSM into `ORDER_PLACED` without
+  touching live, the `EventLoop` runs ticks end-to-end against a stubbed
+  client without network, and the live preflight remains strict.
+  Covered by `npm run test:paper:v2` (33 tests) and
+  `npm run test:paper:runtime` (10 tests). Phase 2 does **not** prove
+  live order placement — that belongs to a later controlled live dry-run
+  phase.
 - Compatibility adapters remain intentionally for safe rollout and backward compatibility:
   - `src/live/config.js`
   - `src/live/logger.js`

@@ -1,10 +1,17 @@
 # LIVE_RUNBOOK
 
-> **Phase 1 — CLOB V2 (V5.7+).** The live runtime targets Polymarket CLOB V2.
+> **Phase 1 — CLOB V2 (V5.7.0).** The live runtime targets Polymarket CLOB V2.
 > The runtime imports `@polymarket/clob-client-v2` lazily and refuses to enter
 > live mode without an explicit `ENABLE_LIVE_TRADING=true` opt-in plus a passing
 > preflight (chain, signature, key, V2 SDK presence, optional collateral wrap).
 > V1 fields like `nonce`, `feeRateBps`, and `taker` are no longer valid.
+>
+> **Phase 2 — Paper mode V2 validation (V5.7.1).** Paper mode is the **mandatory
+> first validation step** before any live test. Paper mode runs the full V2
+> runtime wiring but never places real orders, never requires `PRIVATE_KEY`,
+> never requires `ENABLE_LIVE_TRADING=true`, and never requires the V2 SDK to
+> be installed. Phase 2 does **not** prove live order placement works — that
+> remains a later controlled live dry-run phase.
 
 ## 1. Quick Start (TL;DR)
 

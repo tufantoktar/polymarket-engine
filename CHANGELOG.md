@@ -1,5 +1,62 @@
 # Changelog
 
+## [5.7.1] — Phase 2 Paper Mode V2 Validation
+
+Validation/test/doc hardening on top of the Phase 1 V2 migration. **No
+runtime behavior change beyond banner strings, no new strategies, no
+risk semantics changed, no live placement attempted.**
+
+### Added
+- `scripts/testPaperModeV2.js` — 33 paper-mode V2 isolation tests:
+  paper boots without `PRIVATE_KEY`; paper boots without
+  `ENABLE_LIVE_TRADING=true`; paper ignores live-only collateral wrap
+  config; `PolymarketClient.placeOrder` in paper mode never instantiates
+  the V2 client (`_getClobClient` spy stays at zero); paper responses
+  are marked `paper:true` and `clobVersion:"v2"`; paper `cancelOrder`/
+  `cancelAllOrders`/`getOrderStatus`/`getOpenOrders`/`getFills` are
+  simulated; `LiveExecutionEngine` round-trips a paper order through
+  the FSM into `ORDER_PLACED` without touching live; `Wallet.snapshot`
+  in paper mode does not import ethers; private-key canary never
+  appears in any log payload; live preflight remains strict
+  (regression matrix for `ENABLE_LIVE_TRADING`/`PRIVATE_KEY`/v1/funder/
+  collateral-wrap).
+- `scripts/testPaperRuntime.js` — bounded `EventLoop.tick()` validator.
+  Constructs the real `EventLoop` in paper mode against a stubbed
+  `PolymarketClient` (markets + orderbook only, no network), runs
+  `init()` plus 6 ticks, and asserts: scanner picks up markets, signal
+  engine ingests both tokens, no tick throws, no live SDK is ever
+  instantiated, every placement response (when emitted) is
+  `paper:true`, and the snapshot writer flushes a valid JSON file
+  on stop.
+- New scripts: `npm run test:paper`, `npm run test:paper:v2`,
+  `npm run test:paper:runtime`. Both new scripts are wired into
+  `npm run test:all`.
+
+### Changed
+- `package.json` bumped to `5.7.1`.
+- `scripts/runLive.js` banner updated to `V5.7.1`.
+- README, `docs/LIVE_RUNBOOK.md`, and `config-examples/.env.example`:
+  Phase 2 callout that paper mode validates the V2 wiring but never
+  places real orders, paper mode never requires `PRIVATE_KEY` or
+  `ENABLE_LIVE_TRADING=true`, and paper validation is the mandatory
+  first step before any live test.
+
+### Not changed
+- Risk thresholds, gates, and FSM semantics.
+- Strategy logic, signal engine, market scanner, portfolio state.
+- Compatibility adapter files under `src/live/`.
+- `runLivePreflight()` behavior (regression-tested above).
+- Live trading path. **Phase 2 does not prove live order placement;
+  that belongs to a later controlled live dry-run phase.**
+
+### Verification
+- `npm install` — succeeds for paper-only install (no V2 SDK pulled).
+- `npm run check:live-imports` — `OK (40 files scanned)`.
+- `npm run test:all` — 347/347 passing (state 64, exec 34, reliability
+  67, hardening 72, V2 migration 67, paper-mode V2 33, paper runtime 10).
+- `npm run live:paper` — boots cleanly with the V5.7.1 banner;
+  `clobVersion:"v2"`, `enableLiveTrading:false`.
+
 ## [5.7.0] — Phase 1 Polymarket CLOB V2 Migration
 
 Compatibility-only migration of the live trading integration from

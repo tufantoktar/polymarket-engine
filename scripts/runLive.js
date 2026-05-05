@@ -51,7 +51,7 @@ async function main() {
     process.exit(1);
   }
 
-  log.info("Polymarket Engine V5.7 — live/paper mode", {
+  log.info("Polymarket Engine V5.7.1 — live/paper mode", {
     mode: LIVE_CONFIG.mode,
     clobVersion: LIVE_CONFIG.clob.version,
     enableLiveTrading: LIVE_CONFIG.enableLiveTrading,
