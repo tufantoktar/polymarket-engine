@@ -208,6 +208,17 @@ This check blocks internal imports from reverting to compatibility adapter paths
   lives in a small, testable helper at `src/live/execution/v2OrderBuilder.js`
   and is fully unit-covered (`npm run test:v2`). Live mode requires explicit
   `ENABLE_LIVE_TRADING=true` and a passing preflight before any orders flow.
+- **Phase 3 data collection & backtesting (V5.8.0)**: `npm run collect`
+  records real orderbooks (public endpoints only, no auth/orders) to
+  NDJSON; `npm run backtest` replays them through the **unmodified
+  production `SignalEngine`** with a depth-aware taker fill model and
+  produces a full performance report (return, drawdown, Sharpe, hit rate,
+  slippage). The first synthetic replay exposed and fixed a Kelly sizing
+  bug present since V4.2 that clamped momentum/orderflow position sizes
+  to 0 on non-extreme-priced markets. See `docs/BACKTESTING.md`.
+  Covered by `npm run test:backtest` (47 tests, incl. e2e determinism).
+  A positive backtest is the gate — necessary but not sufficient —
+  before any live capital.
 - **Phase 2 paper mode V2 validation (V5.7.1)**: validation/test/doc
   hardening proving the V2 migration didn't break paper mode. Paper
   mode is provably isolated from the V2 live path: `PolymarketClient`

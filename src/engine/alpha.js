@@ -295,10 +295,18 @@ export function processSigs(signals, weights, regConf, time, liveState) {
     const ae = Math.abs(comp) * (0.5 + conc * 0.5);
     if (ae < 0.006) continue;
     const px = ms[0].px || 0.5;
-    const odds = comp > 0 ? px / (1 - px + 1e-4) : (1 - px) / (px + 1e-4);
+    // Binary-contract Kelly (V5.8 fix — found via backtest replay):
+    // We buy the chosen side at sidePx0; net odds per unit staked are
+    // b = (1 - sidePx0) / sidePx0. Composite edge `ae` is an estimated
+    // probability edge over breakeven, so win prob p = sidePx0 + ae.
+    // Previous formula treated `ae` itself as p and inverted the odds,
+    // clamping kelly to 0 for all but extreme-priced markets.
+    const sidePx0 = cl(dir === "BUY_YES" ? px : 1 - px, 0.02, 0.98);
+    const b = (1 - sidePx0) / (sidePx0 + 1e-4);
+    const p = cl(sidePx0 + ae, 0.01, 0.99);
     // Kelly capped by regime confidence
     const regimeKellyCap = regConf > 0.7 ? 0.25 : regConf > 0.4 ? 0.18 : 0.10;
-    const kelly = cl((ae * odds - (1 - ae)) / (odds + 1e-4) * 0.5, 0, regimeKellyCap) * conf;
+    const kelly = cl((p * b - (1 - p)) / (b + 1e-4) * 0.5, 0, regimeKellyCap) * conf;
     const mkt = liveMarkets[mid];
     const sidePrice = mkt ? (dir === "BUY_YES" ? mkt.yes : 1 - mkt.yes) : 0.5;
     // Volatility-targeted sizing

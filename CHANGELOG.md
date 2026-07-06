@@ -1,5 +1,58 @@
 # Changelog
 
+## [5.8.0] — Phase 3: Data Collection & Backtest Infrastructure
+
+Alpha validation groundwork: record real Polymarket orderbooks and replay
+them through the **unmodified production SignalEngine** with a depth-aware
+fill model. See `docs/BACKTESTING.md`.
+
+### Added
+- `src/data/recorder.js` — `DataRecorder`: polls public Gamma/CLOB read
+  endpoints (no auth, no SDK, no orders) and appends NDJSON events
+  (`session` / `meta` / `book` / `tick` / optional `trades`) with hourly
+  file rotation and graceful stop. One polling round = one `tick` marker
+  so replay decision points match the live loop 1:1.
+- `src/backtest/replay.js` — chronological NDJSON(.gz) event streaming;
+  corrupt lines skipped and counted, never thrown.
+- `src/backtest/fillModel.js` — taker fill simulation walking recorded
+  depth: BUY consumes asks, SELL consumes bids, running-average slippage
+  cap vs mid (mirrors live slippage-guard philosophy), configurable fee
+  bps, partial-fill semantics. Documented as an upper bound (no maker
+  fills, no market impact).
+- `src/backtest/portfolio.js` — average-cost accounting, realized/
+  unrealized PnL, mark-to-mid equity, long-only clamp (no shorting).
+- `src/backtest/metrics.js` — total return, max drawdown, annualized
+  Sharpe from per-tick returns, hit rate, profit factor, avg slippage bps.
+- `src/backtest/runner.js` — `Backtester`: replay → `SignalEngine`
+  (production path) → rec→order mapping identical to `MarketScanner`
+  semantics (`BUY_YES`→BUY asks, `BUY_NO`→SELL bids, skip when flat) →
+  fill sim → portfolio → report. Deterministic given same recording+opts.
+- CLIs: `npm run collect` (`--interval --tokens --minutes --dir --trades`)
+  and `npm run backtest` (`--data --equity --warmup --cooldown
+  --max-slippage --fee-bps --report`).
+- Config: new `data` section (env-overridable: `DATA_OUT_DIR`,
+  `DATA_INTERVAL_MS`, `DATA_MAX_TOKENS`, `DATA_BOOK_LEVELS`,
+  `DATA_RECORD_TRADES`, `DATA_TRADES_LIMIT`, `DATA_META_REFRESH_MS`).
+- `scripts/testBacktestModules.js` — 47 tests incl. e2e determinism
+  (synthetic trending recording replayed twice → byte-identical reports).
+  `npm run test:all` now runs 394 tests.
+
+### Fixed
+- **Kelly sizing bug present since V4.2, exposed by the first synthetic
+  replay**: `processSigs` used the composite edge `ae` (~0.006–0.15) as a
+  win probability and inverted the odds term, clamping `kelly` — and thus
+  `desiredQty` — to 0 for momentum/orderflow signals on all but
+  extreme-priced markets. The live signal path could effectively never
+  size a position. Now: `p = sidePrice + ae`, net odds
+  `b = (1 - sidePrice)/sidePrice`, half-Kelly, unchanged regime cap and
+  confidence scaling. All 347 pre-existing tests remain green.
+
+### Notes
+- Backtest results are an upper bound on realizable edge; a positive
+  backtest is necessary but not sufficient before live capital.
+- Recommended: 1–2 weeks of `npm run collect` before the first serious
+  backtest read.
+
 ## [5.7.1] — Phase 2 Paper Mode V2 Validation
 
 Validation/test/doc hardening on top of the Phase 1 V2 migration. **No

@@ -97,6 +97,17 @@ export const LIVE_CONFIG = {
     orderbookRefreshMs: num("BOOK_REFRESH_MS", 2000), // CLOB book cache TTL
   },
 
+  // ── Data recording (Phase 3: backtesting) ──
+  data: {
+    outDir: env("DATA_OUT_DIR", "data/recordings"),
+    intervalMs: num("DATA_INTERVAL_MS", 10000),      // one tick per 10s
+    maxTokens: num("DATA_MAX_TOKENS", 20),
+    bookLevels: num("DATA_BOOK_LEVELS", 10),         // depth levels kept per side
+    recordTrades: env("DATA_RECORD_TRADES", "0") === "1",
+    tradesLimit: num("DATA_TRADES_LIMIT", 50),
+    metaRefreshMs: num("DATA_META_REFRESH_MS", 300000),
+  },
+
   // ── Market scanner ──
   marketScanner: {
     maxActiveTokens: num("MAX_ACTIVE_TOKENS", 20),
