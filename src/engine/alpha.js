@@ -75,6 +75,7 @@ export function momSigs(mkts, hists, time, regime) {
   for (const [mid, m] of Object.entries(mkts)) {
     const h = hists[mid]; if (!h || h.prices.length < 25) continue;
     const p = h.prices, px = m.yes;
+     if (px > 0.90 || px < 0.10) continue;
     // Short-term
     const r5 = hRoc(p, 5), s10 = hSma(p, 10), v20 = hVol(p, 20);
     // Medium-term
@@ -216,6 +217,7 @@ export function arbSigs(mkts, hists, time) {
 export function orderflowSigs(mkts, lobs, time) {
   const sigs = [];
   for (const [mid, m] of Object.entries(mkts)) {
+if (m.yes > 0.90 || m.yes < 0.10) continue;
     const lob = lobs[mid];
     if (!lob || lob.bidDepth < 10 || lob.askDepth < 10) continue;
     // Orderflow imbalance = (bidDepth - askDepth) / (bidDepth + askDepth)
