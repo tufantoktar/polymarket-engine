@@ -74,6 +74,10 @@ function resolveDataConfig(cfg) {
     recordTrades: c.recordTrades ?? false,
     tradesLimit: c.tradesLimit ?? 50,
     metaRefreshMs: c.metaRefreshMs ?? 5 * 60_000,
+    // V5.9: data-api.polymarket.com wallet trades (public, separate from
+    // the legacy CLOB recordTrades path above, which needs auth we lack).
+    recordWalletTrades: c.recordWalletTrades ?? false,
+    walletTradesLimit: c.walletTradesLimit ?? 200,
   };
 }
 
@@ -106,6 +110,7 @@ export class DataRecorder {
       ticks: 0,
       booksWritten: 0,
       tradesWritten: 0,
+      walletTradesWritten: 0,
       errors: 0,
       bytesWritten: 0,
       startedAt: null,
@@ -203,6 +208,31 @@ export class DataRecorder {
       }
     });
     await Promise.all(tasks);
+
+    if (this.dataCfg.recordWalletTrades) {
+      try {
+        const raw = await this.client.getWalletTrades({ limit: this.dataCfg.walletTradesLimit });
+        if (Array.isArray(raw) && raw.length > 0) {
+          const trades = [];
+          for (const t of raw) {
+            const tokenId = t.asset;
+            if (!tokenId || !this.tokens.has(tokenId)) continue;
+            trades.push({
+              tokenId, wallet: t.proxyWallet, side: t.side,
+              price: Number(t.price), size: Number(t.size),
+              ts: Number(t.timestamp) * 1000,
+            });
+          }
+          if (trades.length > 0) {
+            this._write({ v: RECORD_VERSION, type: "wallet_trades", t: Date.now(), trades });
+            this.stats.walletTradesWritten += trades.length;
+          }
+        }
+      } catch (e) {
+        this.stats.errors++;
+        this.log.errorEvent("recorder:walletTrades", e);
+      }
+    }
 
     this.seq++;
     this.stats.ticks++;

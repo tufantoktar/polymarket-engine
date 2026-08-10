@@ -3,6 +3,7 @@ import { getLogger } from "../logging/index.js";
 import { pushHist } from "../../engine/history.js";
 import { detectRegime, computeWeights } from "../../engine/regime.js";
 import { momSigs, orderflowSigs, processSigs } from "../../engine/alpha.js";
+import { smartMoneySigs } from "../../engine/smartMoney.js";
 
 function resolveSignalConfig(cfg) {
   const c = cfg?.signal || {};
@@ -26,6 +27,7 @@ export class SignalEngine {
     this.signalCfg = resolveSignalConfig(cfg);
 
     // Per-tokenId state
+    this.walletTrades = new Map(); // tokenId -> WalletTrade[] (ring buffer, V5.9)
     this.histories = new Map();   // tokenId -> { prices, spreads, depths, maxLen }
     this.regimes = new Map();     // tokenId -> regime
     this.markets = new Map();     // tokenId -> synthesized market shape
@@ -68,6 +70,24 @@ export class SignalEngine {
     this.histories.set(tokenId, pushHist(hist, book.midPrice, book.spread, depthUsdc));
   }
 
+  /**
+   * V5.9: ingest a batch of normalized wallet trades (any tokens; only
+   * those matching tracked markets accumulate history). Each trade:
+   * {tokenId, wallet, side: "BUY"|"SELL", price, size, ts, isMarketMaker?}.
+   * Maintains a per-token ring buffer capped at cfg.smartMoney.maxTradesPerToken.
+   */
+  ingestWalletTrades(trades) {
+    if (!Array.isArray(trades) || trades.length === 0) return;
+    const cap = this.cfg?.smartMoney?.maxTradesPerToken ?? 500;
+    for (const t of trades) {
+      if (!t || !t.tokenId) continue;
+      const arr = this.walletTrades.get(t.tokenId) || [];
+      arr.push(t);
+      if (arr.length > cap) arr.splice(0, arr.length - cap);
+      this.walletTrades.set(t.tokenId, arr);
+    }
+  }
+
   refreshRegime(tokenId) {
     const h = this.histories.get(tokenId);
     if (!h || h.prices.length < this.signalCfg.regimeMinPoints) return null;
@@ -95,6 +115,10 @@ export class SignalEngine {
       ...momSigs(mkts, hists, now, primaryRegime),
       ...orderflowSigs(mkts, lobs, now),
     ];
+    if (this.cfg?.smartMoney?.enabled) {
+      const walletTrades = Object.fromEntries(this.walletTrades);
+      sigs.push(...smartMoneySigs(mkts, walletTrades, now, this.cfg.smartMoney));
+    }
 
     this.log.decision("generateSignals", {
       tokenCount: tokenIds.length,

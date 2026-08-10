@@ -163,6 +163,11 @@ export class Backtester {
           });
           break;
         }
+        case "wallet_trades":
+          if (Array.isArray(evt.trades) && evt.trades.length > 0) {
+            this.signalEngine.ingestWalletTrades(evt.trades);
+          }
+          break;
         case "tick":
           this._onTick(evt);
           break;

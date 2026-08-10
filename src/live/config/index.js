@@ -69,6 +69,11 @@ export const LIVE_CONFIG = {
     builderAddress: env("BUILDER_ADDRESS", ""),
   },
 
+  // ── Data API (public, no auth — positions/trades/wallet activity) ──────
+  dataApi: {
+    host: env("DATA_API_HOST", "https://data-api.polymarket.com"),
+  },
+
   // ── Collateral / pUSD / wrap (V2) ──────────────────────────────────────
   // V2 introduces explicit collateral handling. The runtime never wraps
   // real funds automatically unless ENABLE_COLLATERAL_WRAP is set true.
@@ -106,6 +111,12 @@ export const LIVE_CONFIG = {
     recordTrades: env("DATA_RECORD_TRADES", "0") === "1",
     tradesLimit: num("DATA_TRADES_LIMIT", 50),
     metaRefreshMs: num("DATA_META_REFRESH_MS", 300000),
+    // V5.9: record data-api.polymarket.com wallet trades alongside books,
+    // so smart-money signals are backtestable (separate from the legacy
+    // recordTrades flag above, which hits the CLOB /trades endpoint and
+    // requires auth we don't have).
+    recordWalletTrades: env("DATA_RECORD_WALLET_TRADES", "0") === "1",
+    walletTradesLimit: num("DATA_WALLET_TRADES_LIMIT", 200),
   },
 
   // ── Market scanner ──
@@ -123,6 +134,25 @@ export const LIVE_CONFIG = {
     defaultVolatility: num("SIGNAL_DEFAULT_VOLATILITY", 0.02),
     defaultCategory: env("SIGNAL_DEFAULT_CATEGORY", "unknown"),
     regimeMinPoints: num("SIGNAL_REGIME_MIN_POINTS", 30),
+  },
+
+  // ── Smart money (V5.9 MVP) ──────────────────────────────────────────────
+  // Wallet-agreement signal sourced from data-api.polymarket.com/trades
+  // (public, no auth). Off by default — narrow MVP, opt-in until
+  // validated in backtest.
+  smartMoney: {
+    enabled: bool("SMART_MONEY_ENABLED", false),
+    pollLimit: num("SMART_MONEY_TRADES_LIMIT", 200),
+    lookbackMs: num("SMART_MONEY_LOOKBACK_MS", 900000),        // 15 min
+    minTradeNotional: num("SMART_MONEY_MIN_TRADE_NOTIONAL", 50), // USDC
+    minAgreeingWallets: num("SMART_MONEY_MIN_WALLETS", 3),
+    edgeScale: num("SMART_MONEY_EDGE_SCALE", 0.06),
+    minEdge: num("SMART_MONEY_MIN_EDGE", 0.006),
+    maxEdge: num("SMART_MONEY_MAX_EDGE", 0.05),
+    halfLifeMs: num("SMART_MONEY_HALFLIFE_MS", 300000),
+    expiryMs: num("SMART_MONEY_EXPIRY_MS", 600000),
+    maxTradesPerToken: num("SMART_MONEY_MAX_TRADES_PER_TOKEN", 500),
+    refreshMs: num("SMART_MONEY_REFRESH_MS", 20000),           // live poll cadence
   },
 
   // ── Portfolio state mapping ──

@@ -233,6 +233,33 @@ export class PolymarketClient {
     return data;
   }
 
+  /**
+   * V5.9: recent trades across (or filtered to) a market, from the
+   * public data-api.polymarket.com feed — no auth required, unlike the
+   * CLOB /trades endpoint above (which 401s without API creds). Returns
+   * raw data-api trade objects: {proxyWallet, side, asset, conditionId,
+   * size, price, timestamp, outcome, outcomeIndex, ...}.
+   * `asset` is the CLOB token_id, same id space as tokenId elsewhere.
+   */
+  async getWalletTrades({ market, limit } = {}) {
+    const l = limit || this.cfg.smartMoney?.pollLimit || 200;
+    const qs = new URLSearchParams({ limit: String(l) });
+    if (market) qs.set("market", market);
+    const url = `${this.cfg.dataApi.host}/trades?${qs.toString()}`;
+    return withRetry(
+      async () => {
+        const res = await this._fetch(url);
+        if (!res.ok) {
+          const err = new Error(`data-api /trades failed: ${res.status}`);
+          err.status = res.status;
+          throw err;
+        }
+        return res.json();
+      },
+      { label: "dataApi:getWalletTrades", logger: this.log }
+    );
+  }
+
   /** Recent trades for a token (public). */
   async getRecentTrades(tokenId, limit = 50) {
     const url = `${this.cfg.clob.host}/trades?market=${encodeURIComponent(tokenId)}&limit=${limit}`;

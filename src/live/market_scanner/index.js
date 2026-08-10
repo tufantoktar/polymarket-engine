@@ -79,6 +79,37 @@ export class MarketScanner {
       }
     });
     await Promise.all(tasks);
+    await this.refreshSmartMoney();
+  }
+
+  /**
+   * V5.9 MVP: pull the global data-api.polymarket.com/trades feed once
+   * per tick, keep only trades on tokens we're actively tracking, and
+   * hand them to the SignalEngine's wallet-trade ring buffer. No-op
+   * (and no network call) unless cfg.smartMoney.enabled.
+   */
+  async refreshSmartMoney() {
+    if (!this.cfg?.smartMoney?.enabled) return;
+    try {
+      const raw = await this.client.getWalletTrades({ limit: this.cfg.smartMoney.pollLimit });
+      if (!Array.isArray(raw) || raw.length === 0) return;
+      const trades = [];
+      for (const t of raw) {
+        const tokenId = t.asset;
+        if (!tokenId || !this.activeTokens.has(tokenId)) continue;
+        trades.push({
+          tokenId,
+          wallet: t.proxyWallet,
+          side: t.side,
+          price: Number(t.price),
+          size: Number(t.size),
+          ts: Number(t.timestamp) * 1000,
+        });
+      }
+      if (trades.length > 0) this.signalEngine.ingestWalletTrades(trades);
+    } catch (e) {
+      this.log.errorEvent("refreshSmartMoney", e);
+    }
   }
 
   async recommendationToOrder(rec) {
