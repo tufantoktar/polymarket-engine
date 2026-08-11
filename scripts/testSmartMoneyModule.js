@@ -10,6 +10,8 @@
 //    - MarketScanner.refreshSmartMoney: no-op when disabled, filters to
 //      activeTokens, normalizes data-api trade shape
 //    - Backtester: "wallet_trades" events replay into ingestWalletTrades
+//    - replay clock: recorded (old) trades must still be evaluated —
+//      regression guard for the V5.9 wall-clock bug
 // ═══════════════════════════════════════════════════════════════════════
 
 import { smartMoneySigs } from "../src/engine/smartMoney.js";
@@ -284,8 +286,92 @@ async function testBacktesterReplay() {
   );
 }
 
+// ── 5. REPLAY CLOCK — the regression that shipped in V5.9 ────────────
+//  V5.9 shipped with smartMoneySigs filtering trades against Date.now()
+//  because SignalEngine.generateRecommendations() hard-coded its own
+//  clock. Every test in this file used fresh Date.now() timestamps, so
+//  all 26 passed — while the signal was incapable of firing during an
+//  actual backtest, where recorded trades are hours or days old. The
+//  first real backtest produced byte-identical results with the signal
+//  on and off, which is how it was caught.
+//
+//  These assertions replay trades with RECORDED (old) timestamps, the
+//  way a real recording does. They fail against the pre-fix code.
+async function testReplayClock() {
+  const cfg = {
+    filters: {}, marketScanner: {}, signal: {}, portfolio: {},
+    smartMoney: { ...SM_CFG, enabled: true, edgeScale: 1, maxEdge: 0.45 },
+  };
+
+  // A recording made 24h ago — the normal case, not an edge case.
+  const recordedNow = Date.now() - 24 * 60 * 60 * 1000;
+
+  function events(tickTime, tradeTime) {
+    return (async function* () {
+      yield { type: "meta", tokens: [{ tokenId: "tokA", question: "q", category: "c", adv: 10000 }] };
+      yield { type: "book", tokenId: "tokA", book: { midPrice: 0.5, spread: 0.02, bidDepth: 900, askDepth: 900 } };
+      yield {
+        type: "wallet_trades",
+        trades: [
+          mkTrade("tokA", "w1", "BUY", 0.5, 1000, tradeTime),
+          mkTrade("tokA", "w2", "BUY", 0.5, 1000, tradeTime),
+          mkTrade("tokA", "w3", "BUY", 0.5, 1000, tradeTime),
+        ],
+      };
+      yield { type: "tick", t: tickTime };
+    })();
+  }
+
+  // Trades recorded 1 minute before the tick that evaluates them —
+  // comfortably inside the 15-minute lookback *in recording time*.
+  const bt = new Backtester({ cfg, opts: { warmupTicks: 0 } });
+  const report = await bt.run(events(recordedNow, recordedNow - 60_000));
+  assert(
+    "replay: recorded wallet trades still produce recommendations",
+    report.counters.recs > 0,
+    `recs=${report.counters.recs} — signal evaluated against wall clock instead of replay clock?`,
+  );
+
+  // Same recording, but the trades are genuinely stale relative to the
+  // tick (2h before it). The lookback must still exclude them, otherwise
+  // we have merely swapped one bug for another.
+  const btStale = new Backtester({ cfg, opts: { warmupTicks: 0 } });
+  const staleReport = await btStale.run(events(recordedNow, recordedNow - 2 * 60 * 60 * 1000));
+  assert(
+    "replay: trades outside the lookback are still excluded",
+    staleReport.counters.recs === 0,
+    `recs=${staleReport.counters.recs}`,
+  );
+
+  // The clock must be the tick's timestamp, not the ingest order.
+  const btFuture = new Backtester({ cfg, opts: { warmupTicks: 0 } });
+  const futureReport = await btFuture.run(events(recordedNow, recordedNow + 60_000));
+  assert(
+    "replay: trades timestamped after the tick are excluded",
+    futureReport.counters.recs === 0,
+    `recs=${futureReport.counters.recs}`,
+  );
+
+  // Live callers omit the clock and must keep wall-clock behaviour.
+  const engLive = new SignalEngine(cfg, silentLog);
+  engLive.ingestOrderbook("tokA", { midPrice: 0.5, spread: 0.02, bidDepth: 900, askDepth: 900 });
+  const freshNow = Date.now();
+  engLive.ingestWalletTrades([
+    mkTrade("tokA", "w1", "BUY", 0.5, 1000, freshNow - 1000),
+    mkTrade("tokA", "w2", "BUY", 0.5, 1000, freshNow - 1000),
+    mkTrade("tokA", "w3", "BUY", 0.5, 1000, freshNow - 1000),
+  ]);
+  const liveRecs = engLive.generateRecommendations({ equity: 1000 });
+  assert(
+    "live: omitting the clock still defaults to wall clock",
+    liveRecs.some(r => r.attr && r.attr.smartMoney !== undefined),
+    JSON.stringify(liveRecs),
+  );
+}
+
 await testMarketScanner();
 await testBacktesterReplay();
+await testReplayClock();
 
 const passed = results.filter(r => r.pass).length;
 console.log("");
