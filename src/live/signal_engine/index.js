@@ -96,7 +96,19 @@ export class SignalEngine {
     return regime;
   }
 
-  generateRecommendations(live) {
+  /**
+   * @param {Object} live       live sizing state (equity, DD, positions, ...)
+   * @param {number} [now]      decision clock, epoch ms.
+   *
+   * `now` exists because signals are not all generated from live state:
+   * smart-money signals are derived from RECORDED trade timestamps. When
+   * the backtester replays a recording, wall-clock `Date.now()` is hours
+   * or days ahead of the data, so every recorded trade falls outside the
+   * lookback window and the signal can never fire. Replay must therefore
+   * be able to supply its own clock. Live callers omit it and get
+   * `Date.now()`, which is the same behaviour as before.
+   */
+  generateRecommendations(live, now = Date.now()) {
     const mkts = Object.fromEntries(this.markets);
     const hists = Object.fromEntries(this.histories);
     const lobs = Object.fromEntries(this.lobs);
@@ -109,7 +121,6 @@ export class SignalEngine {
     }
 
     const weights = computeWeights(primaryRegime, this.metaPerf, 0);
-    const now = Date.now();
 
     const sigs = [
       ...momSigs(mkts, hists, now, primaryRegime),

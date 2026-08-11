@@ -129,7 +129,11 @@ export class Backtester {
       this.counters.skippedWarmup++;
     } else {
       this.counters.decisionTicks++;
-      const recs = this.signalEngine.generateRecommendations(this._liveState());
+      // Replay clock, not wall clock. Recorded events carry their own
+      // timestamps; any signal that filters on event age (smart money's
+      // lookback window) must be evaluated against the recording's own
+      // notion of "now" or it will discard the entire recording.
+      const recs = this.signalEngine.generateRecommendations(this._liveState(), evt.t);
       for (const rec of recs) this._handleRec(rec, evt.t);
     }
     this.curve.push({ t: evt.t, equity: this.portfolio.equity(this._midPrices()) });
