@@ -3,6 +3,9 @@
   "private": true,
   "version": "5.8.0",
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -21,7 +24,15 @@
     "test:paper:v2": "node scripts/testPaperModeV2.js",
     "test:paper:runtime": "node scripts/testPaperRuntime.js",
     "test:paper": "node scripts/testPaperModeV2.js && node scripts/testPaperRuntime.js",
-    "test:all": "node scripts/testStateModules.js && node scripts/testExecutionFlow.js && node scripts/testReliabilityModules.js && node scripts/testHardeningModules.js && node scripts/testV2Migration.js && node scripts/testPaperModeV2.js && node scripts/testPaperRuntime.js && node scripts/testBacktestModules.js && node scripts/testSmartMoneyModule.js",
+    "verify": "node scripts/verify.js",
+    "verify:quick": "node scripts/verify.js --quick",
+    "verify:list": "node scripts/verify.js --list",
+    "test:all": "node scripts/verify.js",
+    "test:unit": "node scripts/verify.js --stage=unit",
+    "test:integration": "node scripts/verify.js --stage=integration",
+    "test:static": "node scripts/verify.js --stage=static",
+    "check:syntax": "node scripts/checkSyntax.js",
+    "check:config-defaults": "node scripts/checkConfigDefaults.js",
     "test:smart-money": "node scripts/testSmartMoneyModule.js",
     "test:hardening": "node scripts/testHardeningModules.js",
     "collect": "node scripts/collect.js",

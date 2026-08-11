@@ -14,3 +14,17 @@ logs/
 .env.local
 .env.*.local
 .KILL
+
+# Recorded market data — grows to GBs on the collector VPS
+data/
+!data/.gitkeep
+
+# Backtest output
+reports/
+
+# Patch files handed between machines
+*.patch
+
+# Editor/manual backups
+*.bak
+*.orig
