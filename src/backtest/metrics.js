@@ -84,7 +84,7 @@ export function tradeStats(trades) {
 /**
  * Full report from a completed run.
  */
-export function computeMetrics({ curve, trades, initialEquity, feesPaid = 0 }) {
+export function computeMetrics({ curve, trades, initialEquity, feesPaid = 0, tickCount = null }) {
   const finalEquity = curve.length ? curve[curve.length - 1].equity : initialEquity;
   const durationMs = curve.length >= 2 ? curve[curve.length - 1].t - curve[0].t : 0;
   return {
@@ -94,7 +94,11 @@ export function computeMetrics({ curve, trades, initialEquity, feesPaid = 0 }) {
     maxDrawdownPct: maxDrawdown(curve) * 100,
     sharpe: sharpe(curve),
     durationHours: durationMs / 3_600_000,
-    ticks: curve.length,
+    // The curve gains one extra point when the run flattens open
+    // inventory at the end. That point belongs in the drawdown and
+    // return series — liquidation cost is real — but it is not a tick,
+    // so the tick count is supplied by the caller when it differs.
+    ticks: tickCount ?? curve.length,
     feesPaid,
     ...tradeStats(trades),
   };

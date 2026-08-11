@@ -297,6 +297,216 @@ async function writeSyntheticRecording(dir) {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+//  Exits (V5.9.1)
+//
+//  Before this, the only way out of a position was an opposing signal on
+//  the same token. Tokens rotate out of the tradable set every few
+//  minutes, so real runs produced zero SELLs: a 107h recording gave 64
+//  fills, all BUY, 25 tokens still open at the end. hitRate and
+//  profitFactor were structurally 0 — unmeasurable, not bad.
+// ─────────────────────────────────────────────────────────────────────
+{
+  const dir = path.join(tmpRoot, "exits");
+  await writeSyntheticRecording(dir);
+  const base = { initialEquity: 10_000, warmupTicks: 35, cooldownMs: 30_000 };
+
+  // Old behaviour is still reachable, and still leaves inventory open.
+  const raw = await new Backtester({ opts: { ...base, flattenAtEnd: false } }).run(dir);
+  assert("exits: --no-flatten leaves positions open",
+    Object.keys(raw.openPositions).length > 0);
+  assert("exits: --no-flatten closes nothing", raw.metrics.closedCount === 0);
+  assert("exits: --no-flatten records no exits",
+    raw.counters.exitsAtEnd === 0 && raw.counters.exitsBySignal === 0);
+
+  // Default flattens, which is what makes the run measurable at all.
+  const flat = await new Backtester({ opts: base }).run(dir);
+  assert("exits: flattenAtEnd is the default",
+    Object.keys(flat.openPositions).length === 0,
+    JSON.stringify(flat.openPositions));
+  assert("exits: flatten produces a closed trade", flat.metrics.closedCount > 0);
+  assert("exits: end-of-run exits counted", flat.counters.exitsAtEnd > 0);
+
+  const endTrades = flat.trades.filter(t => t.exitReason === "end_of_run");
+  assert("exits: end-of-run trades are tagged", endTrades.length === flat.counters.exitsAtEnd);
+  assert("exits: end-of-run trades are SELLs", endTrades.every(t => t.side === "SELL"));
+  assert("exits: closing trade carries book age",
+    endTrades.every(t => typeof t.bookAgeMs === "number"),
+    JSON.stringify(endTrades.map(t => t.bookAgeMs)));
+
+  // Flattening must realize PnL, not invent it: realized total should
+  // move away from zero while equity stays in the same neighbourhood.
+  assert("exits: flatten realizes PnL",
+    Math.abs(flat.metrics.avgWin) + Math.abs(flat.metrics.avgLoss) > 0);
+  assert("exits: flatten does not distort equity wildly",
+    Math.abs(flat.metrics.finalEquity - raw.metrics.finalEquity) < raw.metrics.finalEquity * 0.05,
+    `raw=${raw.metrics.finalEquity.toFixed(2)} flat=${flat.metrics.finalEquity.toFixed(2)}`);
+
+  // Time stop creates turnover during the run, not just at the end.
+  const held = await new Backtester({ opts: { ...base, maxHoldMs: 600_000 } }).run(dir);
+  assert("exits: maxHold closes during the run", held.counters.exitsByMaxHold > 0,
+    JSON.stringify(held.counters));
+  assert("exits: maxHold trades are tagged",
+    held.trades.filter(t => t.exitReason === "max_hold").length === held.counters.exitsByMaxHold);
+  assert("exits: maxHold yields more closes than flatten alone",
+    held.metrics.closedCount > flat.metrics.closedCount);
+
+  // maxHold=0 / null must be a true no-op, not a flatten-everything.
+  const off = await new Backtester({ opts: { ...base, maxHoldMs: 0 } }).run(dir);
+  assert("exits: maxHold=0 is a no-op", off.counters.exitsByMaxHold === 0);
+
+  // Determinism must survive the new exit paths.
+  const d1 = await new Backtester({ opts: { ...base, maxHoldMs: 600_000 } }).run(dir);
+  const d2 = await new Backtester({ opts: { ...base, maxHoldMs: 600_000 } }).run(dir);
+  const strip = r => JSON.stringify({ m: r.metrics, c: r.counters, t: r.trades });
+  assert("exits: deterministic with exits enabled", strip(d1) === strip(d2));
+}
+
+// The headline equity number must describe the same world as the trade
+// statistics. The equity curve is written per tick, so its last point
+// predates the end-of-run flatten; if the report reads finalEquity from
+// there, totalReturn and Sharpe stay pre-flatten while hitRate and
+// profitFactor are post-flatten. That inconsistency showed up on real
+// data as profitFactor 1.81 alongside a -1.53% return.
+{
+  const dir = path.join(tmpRoot, "consistency");
+  await writeSyntheticRecording(dir);
+  const r = await new Backtester({
+    opts: { initialEquity: 10_000, warmupTicks: 35, cooldownMs: 30_000, maxHoldMs: 600_000 },
+  }).run(dir);
+
+  assert("exits: everything is closed after flatten",
+    Object.keys(r.openPositions).length === 0);
+
+  const realized = r.trades.reduce((a, t) => a + (t.realized || 0), 0);
+  const expected = r.metrics.initialEquity + realized - r.metrics.feesPaid;
+  assert("exits: finalEquity equals initialEquity + realized PnL",
+    Math.abs(r.metrics.finalEquity - expected) < 0.01,
+    `final=${r.metrics.finalEquity.toFixed(4)} expected=${expected.toFixed(4)}`);
+
+  // Sign agreement: a positive profitFactor world cannot report a loss.
+  if (r.metrics.profitFactor > 1 && r.metrics.closedCount > 0) {
+    assert("exits: profitFactor > 1 implies a non-negative return",
+      r.metrics.totalReturnPct >= -0.001,
+      `PF=${r.metrics.profitFactor} return=${r.metrics.totalReturnPct}`);
+  }
+}
+
+// A forced exit must not be blocked by the ENTRY slippage cap.
+//
+// The entry cap is 2% measured against mid, so a taker SELL is rejected
+// whenever half the spread exceeds 2% of mid — routine on Polymarket.
+// Applying it to a liquidation reproduces the original bug: the position
+// never closes. First real run with max-hold hit this 30,724 times on a
+// single stuck position.
+{
+  const wideBook = {
+    midPrice: 0.30,
+    bids: [{ price: 0.28, size: 5000 }],   // half-spread = 6.7% of mid
+    asks: [{ price: 0.32, size: 5000 }],
+  };
+
+  // Entry cap alone: rejected.
+  const entryOnly = simulateFill(wideBook, "SELL", 100, { maxSlippagePct: 0.02 });
+  assert("exits: entry cap alone would reject a wide-spread exit", !entryOnly.filled);
+
+  // Exit cap: fills, and the cost is visible rather than hidden.
+  const bt = new Backtester({ opts: { warmupTicks: 0, flattenAtEnd: true } });
+  bt.latestBooks.set("wideTok", wideBook);
+  bt.latestBookAt.set("wideTok", 1_000);
+  bt.portfolio.applyFill(
+    "wideTok", "BUY",
+    { filled: true, filledSize: 100, avgPrice: 0.30, notional: 30, fee: 0, slippagePct: 0 },
+    1_000,
+  );
+  bt.lastEventT = 2_000;
+  bt._flattenAtEnd();
+  assert("exits: forced exit clears a wide-spread position",
+    bt.portfolio.position("wideTok").qty === 0);
+  assert("exits: forced exit is not counted as stuck", bt.counters.stuckPositions === 0);
+  const exitTrade = bt.portfolio.trades.find(t => t.exitReason === "end_of_run");
+  assert("exits: forced exit reports the slippage it paid",
+    exitTrade && exitTrade.slippagePct > 0.02,
+    `slippagePct=${exitTrade?.slippagePct}`);
+}
+
+// A failed exit must not be retried against the same book.
+{
+  const unfillable = { midPrice: 0.30, bids: [], asks: [{ price: 0.32, size: 100 }] };
+  const bt = new Backtester({ opts: { warmupTicks: 0, maxHoldMs: 1, flattenAtEnd: false } });
+  bt.latestBooks.set("noBid", unfillable);
+  bt.latestBookAt.set("noBid", 1_000);
+  bt.portfolio.applyFill(
+    "noBid", "BUY",
+    { filled: true, filledSize: 100, avgPrice: 0.30, notional: 30, fee: 0, slippagePct: 0 },
+    1_000,
+  );
+  bt.openedAt.set("noBid", 1_000);
+
+  bt._applyMaxHold(5_000);
+  assert("exits: first failed attempt is counted", bt.counters.exitsFailedRejected === 1);
+
+  // Books update every 10s in a real recording, so the guard must key on
+  // price, not on the book timestamp — otherwise nothing is suppressed.
+  for (let i = 0; i < 50; i++) {
+    bt.latestBookAt.set("noBid", 1_100 + i);   // fresh book, same price
+    bt._applyMaxHold(6_000 + i);
+  }
+  assert("exits: unchanged best bid is not retried",
+    bt.counters.exitsFailedRejected === 1,
+    `rejected=${bt.counters.exitsFailedRejected}`);
+  assert("exits: skipped retries are counted separately",
+    bt.counters.exitRetriesSkipped === 50,
+    `skipped=${bt.counters.exitRetriesSkipped}`);
+
+  // A CHANGED best bid is a new opportunity and must be tried again.
+  bt.latestBooks.set("noBid", { midPrice: 0.30, bids: [{ price: 0.10, size: 1 }], asks: [] });
+  bt._applyMaxHold(7_000);
+  assert("exits: a changed best bid is retried", bt.counters.exitsFailedRejected === 2);
+
+  // And the retry interval eventually lets a stale price through again.
+  bt._applyMaxHold(7_000 + 300_001);
+  assert("exits: retry interval eventually re-attempts",
+    bt.counters.exitsFailedRejected === 3,
+    `rejected=${bt.counters.exitsFailedRejected}`);
+}
+
+// Inventory that cannot be liquidated at any recorded price must be
+// surfaced, not folded silently into equity.
+{
+  const bt = new Backtester({ opts: { warmupTicks: 0, flattenAtEnd: true } });
+  bt.latestBooks.set("noBid", { midPrice: 0.40, bids: [], asks: [{ price: 0.42, size: 10 }] });
+  bt.latestBookAt.set("noBid", 1_000);
+  bt.portfolio.applyFill(
+    "noBid", "BUY",
+    { filled: true, filledSize: 50, avgPrice: 0.40, notional: 20, fee: 0, slippagePct: 0 },
+    1_000,
+  );
+  bt.lastEventT = 2_000;
+  bt._flattenAtEnd();
+  assert("exits: unliquidatable inventory is counted", bt.counters.stuckPositions === 1);
+  assert("exits: unliquidatable inventory reports its notional",
+    Math.abs(bt.counters.stuckNotional - 20) < 1e-6,
+    `stuckNotional=${bt.counters.stuckNotional}`);
+}
+
+// A position whose token never produced a book cannot be closed. We must
+// count that rather than silently dropping it.
+{
+  const bt = new Backtester({ opts: { warmupTicks: 0, flattenAtEnd: true } });
+  bt.portfolio.applyFill(
+    "ghostToken", "BUY",
+    { filled: true, filledSize: 10, avgPrice: 0.5, notional: 5, fee: 0, slippagePct: 0 },
+    1_000,
+  );
+  bt.lastEventT = 2_000;
+  bt._flattenAtEnd();
+  assert("exits: unclosable position is counted, not dropped",
+    bt.counters.exitsFailedNoBook === 1);
+  assert("exits: unclosable position stays on the book",
+    bt.portfolio.position("ghostToken").qty === 10);
+}
+
+// ─────────────────────────────────────────────────────────────────────
 //  Summary
 // ─────────────────────────────────────────────────────────────────────
 const passed = results.filter(r => r.pass).length;
