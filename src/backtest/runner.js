@@ -105,7 +105,8 @@ export class Backtester {
       skippedNoPosition: 0, rejectedFills: 0,
       exitsBySignal: 0, exitsByMaxHold: 0, exitsAtEnd: 0,
       exitsFailedNoBook: 0, exitsFailedRejected: 0,
-      exitRetriesSkipped: 0, stuckPositions: 0, stuckNotional: 0,
+      exitRetriesSkipped: 0, stuckPositions: 0,
+      stuckValue: 0, stuckCost: 0, stuckNotional: 0,
       parse: {},                    // filled by replayEvents
     };
   }
@@ -268,9 +269,15 @@ export class Backtester {
       const book = this.latestBooks.get(tokenId);
       const px = typeof book?.midPrice === "number" ? book.midPrice : pos.avgPrice;
       this.counters.stuckPositions++;
-      this.counters.stuckNotional += pos.qty * px;
+      // Report BOTH. Market value alone is actively misleading: a position
+      // bought for 34.88 that has gone to zero shows up as "worth 0.02",
+      // which reads as trivial when it is a total loss of 34.88.
+      this.counters.stuckValue += pos.qty * px;
+      this.counters.stuckCost += pos.qty * pos.avgPrice;
     }
-    this.counters.stuckNotional = +this.counters.stuckNotional.toFixed(2);
+    this.counters.stuckValue = +this.counters.stuckValue.toFixed(2);
+    this.counters.stuckCost = +this.counters.stuckCost.toFixed(2);
+    this.counters.stuckNotional = this.counters.stuckValue;   // back-compat
   }
 
   _onTick(evt) {
@@ -361,6 +368,14 @@ export class Backtester {
         initialEquity: this.opts.initialEquity,
         feesPaid: this.portfolio.feesPaid,
         tickCount: this.counters.ticks,
+        // Inventory we could not liquidate, marked to its last book so it
+        // counts as an outcome rather than vanishing from the statistics.
+        openPositions: [...this.portfolio.positions].map(([tokenId, pos]) => ({
+          tokenId,
+          qty: pos.qty,
+          avgPrice: pos.avgPrice,
+          markPrice: this.latestBooks.get(tokenId)?.midPrice ?? pos.avgPrice,
+        })),
       }),
       openPositions: Object.fromEntries(this.portfolio.positions),
       trades: this.portfolio.trades,

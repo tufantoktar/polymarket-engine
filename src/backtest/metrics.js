@@ -61,6 +61,18 @@ export function sharpe(curve) {
   return perTick * Math.sqrt(ticksPerYear);
 }
 
+/**
+ * Statistics over CLOSED trades only.
+ *
+ * Read the limitation before quoting these numbers: a position that goes
+ * to zero usually cannot be sold — no bid remains — so it never becomes a
+ * SELL and never enters this calculation. Winners close; total losers sit
+ * in inventory. On a real 107h run that produced hitRate 84% and
+ * profitFactor 10.4 while equity fell, because 63.48 of cost basis was
+ * parked in two positions bought near 0.90 that had resolved against us.
+ *
+ * `allInStats` exists to make that arithmetic impossible to hide.
+ */
 export function tradeStats(trades) {
   const closes = trades.filter(tr => tr.side === "SELL");
   const wins = closes.filter(tr => tr.realized > 0);
@@ -82,9 +94,55 @@ export function tradeStats(trades) {
 }
 
 /**
+ * Statistics that treat every still-open position as if it were closed at
+ * its mark. This is the honest denominator: it counts the positions the
+ * strategy could not get out of alongside the ones it could.
+ *
+ * @param {Array} trades
+ * @param {Array<{qty:number, avgPrice:number, markPrice:number}>} openPositions
+ */
+export function allInStats(trades, openPositions = []) {
+  const closes = trades.filter(tr => tr.side === "SELL");
+  const realized = closes.reduce((s, tr) => s + (tr.realized || 0), 0);
+
+  const open = openPositions.map(p => {
+    const cost = p.qty * p.avgPrice;
+    const value = p.qty * (Number.isFinite(p.markPrice) ? p.markPrice : p.avgPrice);
+    return { cost, value, pnl: value - cost };
+  });
+
+  const openCost = open.reduce((s, p) => s + p.cost, 0);
+  const openValue = open.reduce((s, p) => s + p.value, 0);
+  const openUnrealized = openValue - openCost;
+
+  // Each open position becomes one synthetic outcome at its mark.
+  const outcomes = [...closes.map(tr => tr.realized || 0), ...open.map(p => p.pnl)];
+  const wins = outcomes.filter(v => v > 0);
+  const losses = outcomes.filter(v => v < 0);
+  const grossWin = wins.reduce((s, v) => s + v, 0);
+  const grossLoss = Math.abs(losses.reduce((s, v) => s + v, 0));
+
+  return {
+    openCount: open.length,
+    openCost: +openCost.toFixed(4),
+    openValue: +openValue.toFixed(4),
+    openUnrealized: +openUnrealized.toFixed(4),
+    realizedPnl: +realized.toFixed(4),
+    netPnl: +(realized + openUnrealized).toFixed(4),
+    allInCount: outcomes.length,
+    allInHitRate: outcomes.length ? wins.length / outcomes.length : 0,
+    allInProfitFactor: grossLoss > 0
+      ? grossWin / grossLoss
+      : (grossWin > 0 ? Infinity : 0),
+  };
+}
+
+/**
  * Full report from a completed run.
  */
-export function computeMetrics({ curve, trades, initialEquity, feesPaid = 0, tickCount = null }) {
+export function computeMetrics({
+  curve, trades, initialEquity, feesPaid = 0, tickCount = null, openPositions = [],
+}) {
   const finalEquity = curve.length ? curve[curve.length - 1].equity : initialEquity;
   const durationMs = curve.length >= 2 ? curve[curve.length - 1].t - curve[0].t : 0;
   return {
@@ -101,5 +159,6 @@ export function computeMetrics({ curve, trades, initialEquity, feesPaid = 0, tic
     ticks: tickCount ?? curve.length,
     feesPaid,
     ...tradeStats(trades),
+    ...allInStats(trades, openPositions),
   };
 }

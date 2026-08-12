@@ -24,7 +24,7 @@ import { DataRecorder, trimBook, parseTokenId, RECORD_VERSION } from "../src/dat
 import { listRecordingFiles, replayEvents } from "../src/backtest/replay.js";
 import { simulateFill } from "../src/backtest/fillModel.js";
 import { BacktestPortfolio } from "../src/backtest/portfolio.js";
-import { maxDrawdown, sharpe, tradeStats, computeMetrics } from "../src/backtest/metrics.js";
+import { maxDrawdown, sharpe, tradeStats, allInStats, computeMetrics } from "../src/backtest/metrics.js";
 import { Backtester } from "../src/backtest/runner.js";
 
 const results = [];
@@ -504,6 +504,85 @@ async function writeSyntheticRecording(dir) {
     bt.counters.exitsFailedNoBook === 1);
   assert("exits: unclosable position stays on the book",
     bt.portfolio.position("ghostToken").qty === 10);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+//  Survivorship bias in the trade statistics
+//
+//  A position that goes to zero cannot be sold — no bid remains — so it
+//  never becomes a SELL and never enters tradeStats. Winners close;
+//  total losers sit in inventory. A real 107h run reported hitRate 84%
+//  and profitFactor 10.4 while equity fell, because 63.48 of cost basis
+//  was parked in two positions bought near 0.90 that resolved against us.
+//
+//  allInStats must count those positions as outcomes.
+// ─────────────────────────────────────────────────────────────────────
+{
+  // Three small winners closed, one large loser stuck at zero.
+  const trades = [
+    { side: "BUY",  realized: 0,  notional: 10 },
+    { side: "SELL", realized: 3,  notional: 13 },
+    { side: "SELL", realized: 4,  notional: 14 },
+    { side: "SELL", realized: 3,  notional: 13 },
+  ];
+  const stuck = [{ qty: 100, avgPrice: 0.90, markPrice: 0.001 }];   // cost 90, now 0.1
+
+  const closedOnly = tradeStats(trades);
+  assert("bias: closed-only sees a perfect record",
+    closedOnly.hitRate === 1 && closedOnly.profitFactor === Infinity);
+
+  const allIn = allInStats(trades, stuck);
+  assert("bias: all-in counts the stuck position as an outcome",
+    allIn.allInCount === 4, `allInCount=${allIn.allInCount}`);
+  assert("bias: all-in hit rate drops to 3 of 4",
+    Math.abs(allIn.allInHitRate - 0.75) < 1e-9, `hitRate=${allIn.allInHitRate}`);
+  assert("bias: all-in profit factor is no longer infinite",
+    Number.isFinite(allIn.allInProfitFactor) && allIn.allInProfitFactor < 1,
+    `PF=${allIn.allInProfitFactor}`);
+  assert("bias: realized is positive while net is negative",
+    allIn.realizedPnl > 0 && allIn.netPnl < 0,
+    `realized=${allIn.realizedPnl} net=${allIn.netPnl}`);
+  assert("bias: unrealized loss equals value minus cost",
+    Math.abs(allIn.openUnrealized - (0.1 - 90)) < 1e-6,
+    `unrealized=${allIn.openUnrealized}`);
+  assert("bias: open cost is reported at cost, not at mark",
+    Math.abs(allIn.openCost - 90) < 1e-6, `openCost=${allIn.openCost}`);
+  assert("bias: open value is reported separately",
+    Math.abs(allIn.openValue - 0.1) < 1e-6, `openValue=${allIn.openValue}`);
+
+  // With nothing stuck the two views must agree.
+  const clean = allInStats(trades, []);
+  assert("bias: no open inventory means all-in equals closed-only",
+    clean.allInHitRate === closedOnly.hitRate &&
+    clean.netPnl === clean.realizedPnl);
+}
+
+// A stuck position must be reported at cost, not only at market value.
+// "worth 0.02" reads as trivial when it represents a total loss of 34.88.
+{
+  const bt = new Backtester({ opts: { warmupTicks: 0, flattenAtEnd: true } });
+  bt.latestBooks.set("dead", { midPrice: 0.001, bids: [], asks: [{ price: 0.002, size: 10 }] });
+  bt.latestBookAt.set("dead", 1_000);
+  bt.portfolio.applyFill(
+    "dead", "BUY",
+    { filled: true, filledSize: 100, avgPrice: 0.90, notional: 90, fee: 0, slippagePct: 0 },
+    1_000,
+  );
+  bt.lastEventT = 2_000;
+  const report = await bt.run((async function* () {})());
+
+  assert("stuck: cost is reported", Math.abs(report.counters.stuckCost - 90) < 1e-6,
+    `stuckCost=${report.counters.stuckCost}`);
+  assert("stuck: market value is reported separately",
+    report.counters.stuckValue < 1, `stuckValue=${report.counters.stuckValue}`);
+  assert("stuck: cost dwarfs market value — that is the point",
+    report.counters.stuckCost > report.counters.stuckValue * 100);
+  assert("stuck: metrics carry the unrealized loss",
+    report.metrics.openUnrealized < -89, `openUnrealized=${report.metrics.openUnrealized}`);
+  assert("stuck: net PnL reflects it even though nothing closed",
+    report.metrics.netPnl < -89, `netPnl=${report.metrics.netPnl}`);
+  assert("stuck: closed-only stats stay empty, which is exactly the trap",
+    report.metrics.closedCount === 0);
 }
 
 // ─────────────────────────────────────────────────────────────────────

@@ -13,6 +13,7 @@ function resolveSignalConfig(cfg) {
     defaultCategory: c.defaultCategory ?? "unknown",
     regimeMinPoints: c.regimeMinPoints ?? 30,
     defaultAdv: cfg?.marketScanner?.defaultAdv ?? 10000,
+    priceBand: c.priceBand,
   };
 }
 
@@ -122,13 +123,20 @@ export class SignalEngine {
 
     const weights = computeWeights(primaryRegime, this.metaPerf, 0);
 
+    // One band, passed to every generator. A signal source that forgets
+    // it is exactly how V5.9 ended up buying a token at 0.9840.
+    const bandCfg = { priceBand: this.signalCfg.priceBand };
+
     const sigs = [
-      ...momSigs(mkts, hists, now, primaryRegime),
-      ...orderflowSigs(mkts, lobs, now),
+      ...momSigs(mkts, hists, now, primaryRegime, bandCfg),
+      ...orderflowSigs(mkts, lobs, now, bandCfg),
     ];
     if (this.cfg?.smartMoney?.enabled) {
       const walletTrades = Object.fromEntries(this.walletTrades);
-      sigs.push(...smartMoneySigs(mkts, walletTrades, now, this.cfg.smartMoney));
+      sigs.push(...smartMoneySigs(
+        mkts, walletTrades, now,
+        { ...this.cfg.smartMoney, priceBand: this.signalCfg.priceBand },
+      ));
     }
 
     this.log.decision("generateSignals", {

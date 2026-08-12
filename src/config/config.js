@@ -6,6 +6,20 @@ export const CFG = {
   maxPos: 1500, maxCatQty: 3000, maxExpNotional: 6000,
   maxDD: 0.20, softDD: 0.12,
   maxSlipBps: 40, minLiqRatio: 3, minSigQuality: 0.2,
+  // Tradable price band shared by every signal source.
+  // 0.20-0.80 caps reward-to-risk asymmetry at 4:1 — see src/engine/priceBand.js.
+  priceBand: { min: 0.20, max: 0.80 },
+  // Hard ceiling on what one market can cost if it resolves against us.
+  // A binary outcome that settles at 0 destroys the whole position, so the
+  // worst case per market is qty * price, not some fraction of it.
+  maxPositionLossPct: 0.01,
+  // Minimum viable order. Expressed in BOTH contracts and notional,
+  // because a contract-only floor means different things at different
+  // prices: 15 contracts is $3 at 0.20 and $12 at 0.80. The old
+  // hard-coded `< 15 contracts` silently made most of the price band
+  // untradable once a per-position risk cap existed.
+  minOrderQty: 5,
+  minOrderNotional: 5,
   maxSpread: 0.06, minDepth: 30, stalenessMs: 10000,
   cbRecoveryMs: 60000, cbHalfOpenMaxNotional: 200, cbHalfOpenProbeMinFills: 1,
   cbSlipThreshold: 5, cbRejectThreshold: 8, cbPoorFillThreshold: 6,
