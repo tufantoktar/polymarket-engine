@@ -76,6 +76,12 @@ const exitFailNote = c.stuckPositions
   ? ` stuck=${c.stuckPositions}`
   : "";
 
+// Closed-trade statistics are survivorship-biased by construction: a
+// position that goes to zero cannot be sold, so it never becomes a close.
+// Show the all-in view directly underneath so the two cannot be read apart.
+const closedOnlyMisleading =
+  m.openCount > 0 && m.profitFactor > 1 && m.netPnl < 0;
+
 let exitWarning = "";
 if (report.opts.flattenAtEnd === false) {
   exitWarning =
@@ -92,9 +98,16 @@ if (report.opts.flattenAtEnd === false) {
 }
 if (c.stuckPositions > 0) {
   exitWarning +=
-    `NOTE: ${c.stuckPositions} position(s) worth ${fmt(c.stuckNotional)} could not be\n` +
-    "liquidated at any recorded price. That value is still inside the\n" +
-    "equity figure above and has not been realized.\n";
+    `NOTE: ${c.stuckPositions} position(s) could not be liquidated at any recorded\n` +
+    `price: cost ${fmt(c.stuckCost)}, now worth ${fmt(c.stuckValue)}. The loss is real\n` +
+    "and unrealized; it is in equity but not in the closed-trade stats.\n";
+}
+if (closedOnlyMisleading) {
+  exitWarning +=
+    `WARNING: closed trades look profitable (PF ${fmt(m.profitFactor)}) while the run\n` +
+    `lost money (net ${fmt(m.netPnl)}). Positions that went to zero could not be\n` +
+    "sold, so they never became closes and are absent from that PF.\n" +
+    "Read the ALL-IN line, not the closed-only line.\n";
 }
 if (maxBookAgeMin > 60) {
   exitWarning +=
@@ -116,7 +129,10 @@ console.log(`
  Skipped       cooldown=${c.skippedCooldown} noBook=${c.skippedNoBook} noPosition=${c.skippedNoPosition} rejected=${c.rejectedFills}
  Trades        count=${m.tradeCount} closed=${m.closedCount} hitRate=${fmt(m.hitRate * 100, 1)}%
  Exits         signal=${c.exitsBySignal} maxHold=${c.exitsByMaxHold} endOfRun=${c.exitsAtEnd}${exitFailNote}
- P&L quality   profitFactor=${fmt(m.profitFactor)} avgWin=${fmt(m.avgWin)} avgLoss=${fmt(m.avgLoss)}
+ Closed only   profitFactor=${fmt(m.profitFactor)} avgWin=${fmt(m.avgWin)} avgLoss=${fmt(m.avgLoss)}
+ ALL-IN        outcomes=${m.allInCount} hitRate=${fmt(m.allInHitRate * 100, 1)}% profitFactor=${fmt(m.allInProfitFactor)}
+ P&L           realized=${fmt(m.realizedPnl)} unrealized=${fmt(m.openUnrealized)} net=${fmt(m.netPnl)}
+ Unsold        n=${m.openCount} cost=${fmt(m.openCost)} value=${fmt(m.openValue)}
  Costs         fees=${fmt(m.feesPaid)} avgSlippage=${fmt(m.avgSlippageBps, 1)} bps
  Exit cost     avgExitSlippage=${fmt(avgExitSlipBps, 1)} bps  (forced exits pay the spread)
 ══════════════════════════════════════════════════════════════════

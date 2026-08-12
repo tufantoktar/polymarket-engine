@@ -22,6 +22,7 @@
 // ═══════════════════════════════════════════════════════════════════════
 
 import { cl, r4 } from "../utils/math.js";
+import { isTradablePrice, resolvePriceBand } from "./priceBand.js";
 
 /**
  * @typedef {Object} WalletTrade
@@ -58,10 +59,14 @@ function resolveSmartMoneyConfig(cfg) {
  */
 export function smartMoneySigs(mkts, walletTrades, time, smCfg) {
   const cfg = resolveSmartMoneyConfig(smCfg);
+  const band = resolvePriceBand(smCfg);
   const sigs = [];
   const cutoff = time - cfg.lookbackMs;
 
   for (const [tokenId, m] of Object.entries(mkts)) {
+    // Same band as every other signal. V5.9 shipped without this check and
+    // the first live-data run bought a token at 0.9840 that went to zero.
+    if (!isTradablePrice(m.yes, band)) continue;
     const trades = walletTrades[tokenId];
     if (!trades || trades.length === 0) continue;
 

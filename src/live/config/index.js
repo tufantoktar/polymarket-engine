@@ -134,6 +134,13 @@ export const LIVE_CONFIG = {
     defaultVolatility: num("SIGNAL_DEFAULT_VOLATILITY", 0.02),
     defaultCategory: env("SIGNAL_DEFAULT_CATEGORY", "unknown"),
     regimeMinPoints: num("SIGNAL_REGIME_MIN_POINTS", 30),
+    // Tradable price band, applied to every signal source.
+    // Widening this re-admits the extreme-price trades that produced a
+    // fake +6.67% backtest before the guard existed. See priceBand.js.
+    priceBand: {
+      min: num("SIGNAL_MIN_PRICE", 0.20),
+      max: num("SIGNAL_MAX_PRICE", 0.80),
+    },
   },
 
   // ── Smart money (V5.9 MVP) ──────────────────────────────────────────────

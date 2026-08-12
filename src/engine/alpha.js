@@ -7,6 +7,7 @@ import { CFG } from "../config/config.js";
 import { NEWS, PAIRS } from "../config/marketDefs.js";
 import { SRC_W, SRCS } from "../config/constants.js";
 import { hRoc, hSma, hStd, hVol } from "./history.js";
+import { isTradablePrice, resolvePriceBand } from "./priceBand.js";
 
 /**
  * Generate a random news event from the NEWS templates.
@@ -70,12 +71,14 @@ export function nlpSigs(nev, mkts, time) {
  * @param {import('./types.js').Regime} regime
  * @returns {import('./types.js').Signal[]}
  */
-export function momSigs(mkts, hists, time, regime) {
+export function momSigs(mkts, hists, time, regime, cfg = CFG) {
   const sigs = [];
+  const band = resolvePriceBand(cfg);
   for (const [mid, m] of Object.entries(mkts)) {
     const h = hists[mid]; if (!h || h.prices.length < 25) continue;
     const p = h.prices, px = m.yes;
-     if (px > 0.90 || px < 0.10) continue;
+    // Shared band — see src/engine/priceBand.js for why 0.20-0.80.
+    if (!isTradablePrice(px, band)) continue;
     // Short-term
     const r5 = hRoc(p, 5), s10 = hSma(p, 10), v20 = hVol(p, 20);
     // Medium-term
@@ -214,10 +217,11 @@ export function arbSigs(mkts, hists, time) {
  * @param {number} time
  * @returns {import('./types.js').Signal[]}
  */
-export function orderflowSigs(mkts, lobs, time) {
+export function orderflowSigs(mkts, lobs, time, cfg = CFG) {
   const sigs = [];
+  const band = resolvePriceBand(cfg);
   for (const [mid, m] of Object.entries(mkts)) {
-if (m.yes > 0.90 || m.yes < 0.10) continue;
+    if (!isTradablePrice(m.yes, band)) continue;
     const lob = lobs[mid];
     if (!lob || lob.bidDepth < 10 || lob.askDepth < 10) continue;
     // Orderflow imbalance = (bidDepth - askDepth) / (bidDepth + askDepth)
@@ -329,7 +333,34 @@ export function processSigs(signals, weights, regConf, time, liveState) {
     if (liveCbState === "half_open" && sidePrice > 0) {
       desiredQty = Math.min(desiredQty, Math.floor(CFG.cbHalfOpenMaxNotional / sidePrice));
     }
-    if (desiredQty < 15) continue;
+
+    // ── Per-market worst-case loss cap ────────────────────────────────
+    //  These are binary contracts. When a market resolves against the
+    //  position it settles at 0 and there is usually no bid left to sell
+    //  into, so the worst case is the ENTIRE cost of the position, not a
+    //  drawdown on it. Kelly does not protect us here: it reads price as
+    //  probability, so at 0.89 it concludes "89% likely to win" and sizes
+    //  up — which is precisely how a single market came to cost 3.5% of
+    //  the book (34.88 on 1000) in the 107h backtest.
+    //
+    //  The cap is on the whole position, existing inventory included, so
+    //  it cannot be circumvented by averaging in over several ticks.
+    if (CFG.maxPositionLossPct > 0 && sidePrice > 0) {
+      const maxLossCash = CFG.maxPositionLossPct * capitalBase;
+      const heldQty = pos.yesQty + pos.noQty;
+      const heldRisk = heldQty * sidePrice;
+      const roomCash = Math.max(0, maxLossCash - heldRisk);
+      desiredQty = Math.min(desiredQty, Math.floor(roomCash / sidePrice));
+    }
+
+    // Dust floor. Both conditions matter: qty guards against fragmenting
+    // into unfillable slivers, notional guards against orders too small to
+    // be worth the spread. A contract-only floor is price-dependent by
+    // accident — 15 contracts is $3 at 0.20 and $12 at 0.80 — which made
+    // the upper half of the band untradable as soon as a per-position risk
+    // cap was introduced.
+    if (desiredQty < CFG.minOrderQty) continue;
+    if (desiredQty * sidePrice < CFG.minOrderNotional) continue;
     const attr = {};
     ms.forEach(s => { attr[s.source] = (attr[s.source] || 0) + s.ee * s.conf; });
     const ta = Object.values(attr).reduce((s, v) => s + Math.abs(v), 0) || 1;
