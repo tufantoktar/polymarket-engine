@@ -36,6 +36,8 @@
     "test:smart-money": "node scripts/testSmartMoneyModule.js",
     "test:price-band": "node scripts/testPriceBand.js",
     "test:sizing-caps": "node scripts/testSizingCaps.js",
+    "test:trade-dedup": "node scripts/testTradeDedup.js",
+    "data:dedupe": "node scripts/dedupeRecordings.js",
     "test:hardening": "node scripts/testHardeningModules.js",
     "collect": "node scripts/collect.js",
     "backtest": "node scripts/backtest.js",

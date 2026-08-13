@@ -17,6 +17,11 @@
 //    {v:1, type:"meta",    t, tokens:[{tokenId, question, category, adv, endDate, tickSize, negRisk}]}
 //    {v:1, type:"book",    t, tokenId, book:{bids, asks, bestBid, bestAsk, midPrice, spread, bidDepth, askDepth}}
 //    {v:1, type:"trades",  t, tokenId, trades:[...]}
+//    {v:1, type:"wallet_trades", t, trades:[{tokenId, wallet, side, price,
+//                                            size, ts, tx}]}
+//      Deduplicated at write time: the data-api feed re-delivers the same
+//      trade for several minutes, so each fill is written once. `tx` is
+//      the transaction hash, kept so readers can verify identity.
 //    {v:1, type:"tick",    t, seq, books}
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -26,6 +31,7 @@ import path from "node:path";
 
 import { LIVE_CONFIG } from "../live/config/index.js";
 import { getLogger } from "../live/logging/index.js";
+import { TradeDeduper } from "./tradeDedup.js";
 
 export const RECORD_VERSION = 1;
 
@@ -78,6 +84,7 @@ function resolveDataConfig(cfg) {
     // the legacy CLOB recordTrades path above, which needs auth we lack).
     recordWalletTrades: c.recordWalletTrades ?? false,
     walletTradesLimit: c.walletTradesLimit ?? 200,
+    tradeDedupTtlMs: c.tradeDedupTtlMs ?? 30 * 60_000,
   };
 }
 
@@ -98,6 +105,11 @@ export class DataRecorder {
     this.dataCfg = { ...resolveDataConfig(cfg), ...overrides };
 
     this.tokens = new Map();      // tokenId -> meta
+    // The wallet-trade feed re-delivers the same trade on roughly forty
+    // consecutive polls; without this every one of them was written.
+    this.tradeDeduper = new TradeDeduper({
+      ttlMs: this.dataCfg.tradeDedupTtlMs,
+    });
     this.seq = 0;
     this.running = false;
     this._timer = null;
@@ -111,6 +123,7 @@ export class DataRecorder {
       booksWritten: 0,
       tradesWritten: 0,
       walletTradesWritten: 0,
+      walletTradesDuplicate: 0,
       errors: 0,
       bytesWritten: 0,
       startedAt: null,
@@ -213,16 +226,25 @@ export class DataRecorder {
       try {
         const raw = await this.client.getWalletTrades({ limit: this.dataCfg.walletTradesLimit });
         if (Array.isArray(raw) && raw.length > 0) {
-          const trades = [];
-          for (const t of raw) {
-            const tokenId = t.asset;
-            if (!tokenId || !this.tokens.has(tokenId)) continue;
-            trades.push({
-              tokenId, wallet: t.proxyWallet, side: t.side,
-              price: Number(t.price), size: Number(t.size),
-              ts: Number(t.timestamp) * 1000,
-            });
-          }
+          // Deduplicate against what we have already written, THEN map to
+          // our own shape. Dedup needs transactionHash, which the mapping
+          // used to discard.
+          const tracked = raw.filter(t => t.asset && this.tokens.has(t.asset));
+          const fresh = this.tradeDeduper.filterNew(tracked, now);
+          this.stats.walletTradesDuplicate += tracked.length - fresh.length;
+
+          const trades = fresh.map(t => ({
+            tokenId: t.asset,
+            wallet: t.proxyWallet,
+            side: t.side,
+            price: Number(t.price),
+            size: Number(t.size),
+            ts: Number(t.timestamp) * 1000,
+            // Recorded so a later reader can deduplicate independently and
+            // so the identity used here is auditable rather than implied.
+            tx: t.transactionHash ?? null,
+          }));
+
           if (trades.length > 0) {
             this._write({ v: RECORD_VERSION, type: "wallet_trades", t: Date.now(), trades });
             this.stats.walletTradesWritten += trades.length;

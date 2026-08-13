@@ -55,6 +55,7 @@ const STAGES = [
       { name: "hardening",   script: "scripts/testHardeningModules.js" },
       { name: "price-band",  script: "scripts/testPriceBand.js" },
       { name: "sizing-caps", script: "scripts/testSizingCaps.js" },
+      { name: "trade-dedup", script: "scripts/testTradeDedup.js" },
       { name: "smart-money", script: "scripts/testSmartMoneyModule.js" },
     ],
   },
