@@ -15,12 +15,14 @@ logs/
 .env.*.local
 .KILL
 
-# Recorded market data — grows to GBs on the collector VPS
-data/
-!data/.gitkeep
+# Recorded market data — grows to GBs on the collector VPS.
+# Anchored with a leading slash: an unanchored `data/` also matches
+# src/data/, which silently excluded a new source module.
+/data/
+!/data/.gitkeep
 
 # Backtest output
-reports/
+/reports/
 
 # Patch files handed between machines
 *.patch
