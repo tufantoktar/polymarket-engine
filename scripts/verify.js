@@ -56,6 +56,8 @@ const STAGES = [
       { name: "price-band",  script: "scripts/testPriceBand.js" },
       { name: "sizing-caps", script: "scripts/testSizingCaps.js" },
       { name: "trade-dedup", script: "scripts/testTradeDedup.js" },
+      { name: "calibration", script: "scripts/testCalibration.js" },
+      { name: "wallet-score", script: "scripts/testWalletScoring.js" },
       { name: "smart-money", script: "scripts/testSmartMoneyModule.js" },
     ],
   },
