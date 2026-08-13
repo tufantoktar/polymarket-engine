@@ -99,3 +99,93 @@ API will not supply the history retrospectively.
 
 Smart money does not reopen. The question was answered with adequate
 power.
+
+---
+
+## Smart Money — KILL (13 Ağustos 2026)
+
+**Soru:** Geçmişte iyi probability judgement göstermiş cüzdanların sonraki
+işlemleri, işlem anındaki Polymarket fiyatından out-of-sample olarak daha
+iyi sonuç tahmin ediyor mu?
+
+**Cevap: Hayır.**
+
+Kesim 2026-03-20 (tam veriden bir kez hesaplandı, iki koşuda da aynı).
+Cüzdan eşikleri 10+ işlem / 3+ event, test 5+ işlem. Skorlama yalnızca
+kesim öncesi veriyi görüyor; gelecek performans skora hiç girmiyor.
+
+| | ORİJİNAL | COMPLETE ONLY |
+|---|---|---|
+| D10 geçmiş edge | +14.54c | — |
+| D10 gelecek edge | −1.40c | +0.24c |
+| %95 (event-kümeli) | [−3.52c, 1.06c] | [−2.44c, 2.95c] |
+| event | 161 | 122 |
+| rastgele yüzdelik | %1 | %20 |
+| decile sıralaması | %56 | %56 |
+
+Giriş maliyeti eşiği 1.00c. İki koşuda da aralık sıfırı içeriyor ve nokta
+tahmini maliyetin altında.
+
+### En anlamlı bulgu
+
+Complete-only koşuda D10 +0.24c, aynı havuzdan rastgele seçilen cüzdan
+gruplarının medyanı +0.89c. Yani "geçmişte iyi yargı göstermiş" diye
+seçtiğimiz cüzdanlar rastgele seçilenlerden daha kötü performans veriyor.
+Seçim kriteri bilgi taşımıyor. Kazananın laneti tam olarak böyle görünür:
+geçmiş +14.54c'lik ayrışma, becerinin değil örneklem gürültüsünün üst
+kuyruğunu seçmiş.
+
+### Cüzdan bağımsızlığı
+
+D10'da 203 cüzdan, 5+ ortak pozisyonlu 774 çift, en yüksek benzerlik %59.
+%50 üstü örtüşen 8 çift tek aktör sayıldığında (203 -> 195 cüzdan)
+D10 −1.40c'den −1.41c'ye gitti. Sonuç birkaç bağlantılı cüzdanın eseri
+değil.
+
+### Yöntem notu — kayda değer
+
+Satır bazlı bootstrap, aynı eventteki işlemleri bağımsız sayıyor ve bu
+veride yanlış. Doğru aralıktan 2.6x (orijinal) ve 2.0x (complete) dar
+çıkıyor. O yanlış yöntemle orijinal koşu kabaca [−2.29c, −0.52c] verirdi:
+sıfırı dışlayan, istatistiksel olarak anlamlı NEGATİF bir sonuç. Yanlış
+bağımsızlık varsayımı olmayan bir kesinlik üretiyor — her iki yönde de.
+
+Hız için `fastClusterMeanCI` eklendi: ortalama için küme başına (toplam,
+adet) önceden hesaplanıyor, her iterasyonda satır kopyalanmıyor. Aynı
+seed ile paylaşılan `clusterBootstrapCI` ile 8 hanede birebir aynı
+sonucu verdiği doğrulandı. Koşu süresi ~40dk'dan 15 saniyeye indi.
+
+### Karar
+
+**SmartMoneyCopyStrategy → DISABLED / EXPERIMENTAL.**
+Üretime uygun değil. `SMART_MONEY_ENABLED` opt-in kalır ve varsayılan
+KAPALI. Canlı ya da paper üretim koşusunda açılmaz.
+
+**WalletIntelligenceEngine → KEEP (araştırma altyapısı).**
+Skorlama, decile ve örtüşme araçları doğru çalışıyor; hipotezi çürüten
+ölçüm bunlarla yapıldı. Silinmez, ama sinyal üretmez.
+
+**Korunan altyapı:** `src/research/walletScoring.js`,
+`src/research/calibration.js`, `scripts/researchSmartMoney.js`,
+`scripts/researchSmartMoneyRobustness.js`, `src/data/tradeDedup.js`.
+
+### Bu araştırmanın SONUÇLANDIRMADIĞI şeyler
+
+- Negatif D10 bir "ters yönde kopyalama stratejisi" DEĞİLDİR. Bu ayrı bir
+  hipotezdir, kendi ön-kayıtlı deneyini gerektirir ve burada test
+  edilmemiştir. Aynı veriden okunması aynı gürültüyü ikinci kez
+  kullanmak olur.
+- Eşik ayarı, skor formülü değişikliği veya alternatif decile tanımı
+  denenmedi. Kasıtlı: hipotez reddedildikten sonra yapılan arama,
+  arama değil kurtarma girişimidir.
+
+### Kapanan hipotezler (kümülatif)
+
+| hipotez | karar | dayanak |
+|---|---|---|
+| Kısa ufuk momentum/orderflow | KILL | sinyal−kontrol ~0 vs 2.00c maliyet |
+| Maker spread yakalama | KILL | ters seçim −0.52c/−1.83c vs 0.72c |
+| Venue mikroyapı | KILL | medyan spread = tick, 84 markette 1 kote |
+| Mekanik arbitraj | KILL | YES+NO 1.0100/0.9900, tam bir tick |
+| Event mispricing | YETERSİZ VERİ | 60 kullanılabilir event |
+| Smart money kopyalama | KILL | D10 gelecek −1.40c / +0.24c, ikisi de sıfırı içeriyor |
