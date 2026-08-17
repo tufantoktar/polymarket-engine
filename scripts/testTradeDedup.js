@@ -227,6 +227,120 @@ const trade = (o = {}) => ({
   await fsp.rm(dir, { recursive: true, force: true });
 }
 
+// ─────────────────────────────────────────────────────────────────────
+//  Recorder: a 404 means the market is gone, not that the request failed
+//
+//  470 finished markets were polled every 10s until the next token
+//  refresh noticed, producing ~30k ERROR lines and ~30k pointless
+//  requests. An audit of 2.6M recorded books found no token that 404'd
+//  and later produced a book, so retiring on 404 loses nothing.
+//
+//  A retired token legitimately returns at the next meta refresh if the
+//  market list still carries it, so the list is frozen here to measure
+//  retirement rather than refresh.
+// ─────────────────────────────────────────────────────────────────────
+{
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "retire-"));
+  const mkt = (id, tok) => ({
+    id, question: id, clobTokenIds: JSON.stringify([tok]),
+    volume24hr: 10_000, endDate: new Date(Date.now() + 86_400_000).toISOString(),
+  });
+  const calls = { tokLive: 0, tokDead: 0, tokFlaky: 0 };
+  const err = (msg, status) => Object.assign(new Error(msg), { status });
+  const client = {
+    getTradableMarkets: async () => [
+      mkt("m1", "tokLive"), mkt("m2", "tokDead"), mkt("m3", "tokFlaky"),
+    ],
+    getOrderbook: async tokenId => {
+      calls[tokenId]++;
+      if (tokenId === "tokDead") throw err("CLOB /book failed: 404", 404);
+      if (tokenId === "tokFlaky") throw err("CLOB /book failed: 502", 502);
+      return {
+        bids: [{ price: 0.49, size: 100 }], asks: [{ price: 0.51, size: 100 }],
+        bestBid: 0.49, bestAsk: 0.51, midPrice: 0.5, spread: 0.02,
+        bidDepth: 49, askDepth: 51,
+      };
+    },
+    getWalletTrades: async () => [],
+  };
+  const rec = new DataRecorder({
+    client, logger: silentLog, overrides: { outDir: dir, maxTokens: 5 },
+  });
+  const t0 = Date.now();
+  await rec.start();
+  await rec.pollOnce(t0);
+  rec._lastMetaRefresh = t0;          // freeze the market list
+
+  assert("recorder: a 404 retires the token", !rec.tokens.has("tokDead"));
+  assert("recorder: a non-404 failure keeps the token", rec.tokens.has("tokFlaky"));
+  assert("recorder: retirement is counted", rec.stats.tokensRetired >= 1,
+    `retired=${rec.stats.tokensRetired}`);
+
+  const before = { ...calls };
+  const errsBefore = rec.stats.errors;
+  await rec.pollOnce(t0 + 10_000);
+
+  assert("recorder: a retired token is not polled again",
+    calls.tokDead === before.tokDead, `${before.tokDead} -> ${calls.tokDead}`);
+  assert("recorder: a flaky token keeps being polled",
+    calls.tokFlaky === before.tokFlaky + 1, `${before.tokFlaky} -> ${calls.tokFlaky}`);
+  assert("recorder: the healthy token is unaffected",
+    calls.tokLive === before.tokLive + 1, `${before.tokLive} -> ${calls.tokLive}`);
+  assert("recorder: only the real failure raises the error count",
+    rec.stats.errors === errsBefore + 1,
+    `${errsBefore} -> ${rec.stats.errors}`);
+  await rec.stop();
+  await fsp.rm(dir, { recursive: true, force: true });
+}
+
+// ─────────────────────────────────────────────────────────────────────
+//  Recorder: an unauthorized trades endpoint is asked once, not forever
+//
+//  A missing credential does not heal by retrying. 1200 identical 401s
+//  were logged as "recorder:book", so they also read as orderbook
+//  failures rather than a configuration fact.
+// ─────────────────────────────────────────────────────────────────────
+{
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "auth-"));
+  let tradeCalls = 0;
+  const client = {
+    getTradableMarkets: async () => [{
+      id: "m1", question: "q", clobTokenIds: JSON.stringify(["tokA"]),
+      volume24hr: 10_000, endDate: new Date(Date.now() + 86_400_000).toISOString(),
+    }],
+    getOrderbook: async () => ({
+      bids: [{ price: 0.49, size: 100 }], asks: [{ price: 0.51, size: 100 }],
+      bestBid: 0.49, bestAsk: 0.51, midPrice: 0.5, spread: 0.02,
+      bidDepth: 49, askDepth: 51,
+    }),
+    getRecentTrades: async () => {
+      tradeCalls++;
+      throw Object.assign(new Error("CLOB /trades failed: 401"), { status: 401 });
+    },
+    getWalletTrades: async () => [],
+  };
+  const rec = new DataRecorder({
+    client, logger: silentLog,
+    overrides: { outDir: dir, recordTrades: true, maxTokens: 5 },
+  });
+  const t0 = Date.now();
+  await rec.start();
+  await rec.pollOnce(t0);
+  const settled = tradeCalls;
+  for (let i = 1; i <= 3; i++) await rec.pollOnce(t0 + i * 10_000);
+
+  assert("recorder: an unauthorized trades endpoint stops being asked",
+    tradeCalls === settled, `settled=${settled} then ${tradeCalls}`);
+  assert("recorder: it gives up almost immediately", settled <= 2,
+    `calls before giving up=${settled}`);
+  assert("recorder: books keep being written despite the auth failure",
+    rec.stats.booksWritten >= 4, `books=${rec.stats.booksWritten}`);
+  assert("recorder: a missing credential is not logged as an error",
+    rec.stats.errors === 0, `errors=${rec.stats.errors}`);
+  await rec.stop();
+  await fsp.rm(dir, { recursive: true, force: true });
+}
+
 const passed = results.filter(r => r.pass).length;
 console.log("");
 console.log("═══════════════════════════════════════════════════");

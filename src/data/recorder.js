@@ -208,14 +208,47 @@ export class DataRecorder {
         books++;
         this.stats.booksWritten++;
 
-        if (this.dataCfg.recordTrades) {
-          const trades = await this.client.getRecentTrades(tokenId, this.dataCfg.tradesLimit);
-          if (Array.isArray(trades) && trades.length > 0) {
-            this._write({ v: RECORD_VERSION, type: "trades", t: Date.now(), tokenId, trades });
-            this.stats.tradesWritten++;
+        // Trades are fetched in their own try so a trades failure cannot
+        // be reported as "recorder:book", which is what made 1200 auth
+        // errors look like orderbook errors.
+        if (this.dataCfg.recordTrades && !this._tradesUnauthorized) {
+          try {
+            const trades = await this.client.getRecentTrades(tokenId, this.dataCfg.tradesLimit);
+            if (Array.isArray(trades) && trades.length > 0) {
+              this._write({ v: RECORD_VERSION, type: "trades", t: Date.now(), tokenId, trades });
+              this.stats.tradesWritten++;
+            }
+          } catch (e) {
+            // 401 means this deployment has no CLOB credentials. That does
+            // not heal by retrying, so stop asking instead of logging the
+            // same rejection once per token per tick.
+            if (e?.status === 401 || e?.status === 403) {
+              this._tradesUnauthorized = true;
+              this.log.info("Recorder: CLOB trades unauthorized, disabling trade capture", {
+                status: e.status,
+              });
+            } else {
+              this.stats.errors++;
+              this.log.errorEvent("recorder:trades", e, { tokenId });
+            }
           }
         }
       } catch (e) {
+        // A 404 on /book means the market is gone, not that the request
+        // failed. Polling it anyway produced ~30k ERROR lines and ~30k
+        // pointless requests: 470 finished markets, each polled every 10s
+        // for the ~5 minutes until the next token refresh dropped it.
+        //
+        // An audit of 2.6M recorded books found no case of a token that
+        // 404'd and later produced a book, so retiring on 404 costs no
+        // data. The token returns on the next refresh if it is genuinely
+        // still tradable.
+        if (e?.status === 404) {
+          this.tokens.delete(tokenId);
+          this.stats.tokensRetired = (this.stats.tokensRetired || 0) + 1;
+          this.log.info("Recorder: token retired after 404", { tokenId });
+          return;
+        }
         this.stats.errors++;
         this.log.errorEvent("recorder:book", e, { tokenId });
       }
