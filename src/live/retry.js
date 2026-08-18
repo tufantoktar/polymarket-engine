@@ -45,7 +45,21 @@ export async function withRetry(fn, opts = {}) {
     } catch (e) {
       lastErr = e;
       const retryable = isRetryable(e);
-      log.errorEvent(`${label}:attempt${attempt}`, e, { attempt, retryable });
+      // This layer knows whether it will try again. It does not know what
+      // the failure MEANS -- a 404 on an orderbook is a finished market,
+      // not a fault -- so severity belongs to the caller, which has that
+      // context. Logging every non-retryable failure as an error here put
+      // ~30k lifecycle events into the error log and buried the 502s and
+      // 429s that genuinely needed attention.
+      //
+      // The error still propagates unchanged, so a caller that considers
+      // it serious logs it with the detail this layer cannot supply.
+      // Optional call because some injected loggers only define errorEvent.
+      if (retryable) {
+        log.errorEvent(`${label}:attempt${attempt}`, e, { attempt, retryable });
+      } else {
+        log.debug?.(`${label}:not-retryable`, { attempt, status: e?.status ?? null });
+      }
       if (!retryable || attempt === maxAttempts) throw e;
 
       // Exponential backoff with jitter
