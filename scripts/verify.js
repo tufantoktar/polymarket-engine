@@ -85,9 +85,11 @@ const STAGES = [
   {
     id: "safety",
     label: "Safety regression gates",
-    tier: "pending",
-    pendingNote: "Phase 2 — scripts/testSafetyGates.js (S1-S20)",
-    steps: [],
+    tier: "quarantined",
+    knownIssue: "KI-002",
+    steps: [
+      { name: "safety-gates", script: "scripts/testSafetyGates.js" },
+    ],
   },
   {
     id: "smoke",

@@ -74,3 +74,46 @@ gate is built.
    this entry.
 
 Do **not** close this by weakening assertion #18.
+
+---
+
+## KI-002 — LiveRiskEngine does not validate its inputs
+
+**Bulunma:** 21 Ağustos 2026, `scripts/testSafetyGates.js` ilk koşusu
+**Durum:** AÇIK — karantinada, canlı işlem öncesi kapatılması zorunlu
+**Son kullanma:** 21 Eylül 2026
+
+### Kök neden
+
+`checkOrder` limitleri kontrol ediyor ama **girdinin kendisini** hiç
+doğrulamıyor. Sayısal karşılaştırmalar NaN'la sessizce false döndüğü
+için bozuk bir emir bütün guard zincirini dokunulmadan geçiyor.
+
+### Kanıt (16 başarısız iddia)
+
+**Fiyat — hiç doğrulanmıyor.** Şunların hepsi `ok:true` dönüyor:
+`0`, `-0.5`, `1`, `1.5`, `NaN`, `"0.5"`, `undefined`.
+
+`price=undefined` durumunda `notional` NaN oluyor, `NaN > maxOrderNotional`
+false, ve emir geçiyor. Sıfır ya da bir fiyat bir ikili kontratta
+tanımsızdır: sıfırda ödeme yok, birde risk yok.
+
+**Boyut — yarım doğrulanıyor.** `0` ve negatif yakalanıyor (`adjSize < 1`
+sayesinde), ama `NaN`, `"10"`, `undefined` ve `Infinity` geçiyor.
+String olan `adjustedSize: "10"` olarak çıkıp tipi aşağıya sızdırıyor.
+
+**Yön — bozuksa sessizce tersine çevriliyor.**
+`order.side === "BUY" ? adjSize : -adjSize` yazıldığı için `"BUY"`
+dışındaki her şey SELL sayılıyor: eksik yön, `"buy"`, `null`, `""`.
+Küçük harfli bir `"buy"` alım emrini satış emrine dönüştürür.
+
+### Şu anki hafifletme
+
+Paper mode. Ayrıca KI-001 nedeniyle canlı emir yolu hiç çalışmamış
+durumda. Yani bugün gerçek para riski yok — ama bu iki kusurdan
+birinin düzelmesi diğerini tek başına tehlikeli hale getirir.
+
+### Neden test önce yazıldı
+
+Düzeltmeden sonra yazılan bir test, düzeltmenin neyi değiştirdiğini
+kanıtlamaz. Bu iddialar kusur açıkken commit'lendi.
