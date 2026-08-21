@@ -76,8 +76,7 @@ const STAGES = [
   {
     id: "v2",
     label: "CLOB V2 migration",
-    tier: "quarantined",
-    knownIssue: "KI-001",
+    tier: "mandatory",
     steps: [
       { name: "v2-migration", script: "scripts/testV2Migration.js" },
     ],

@@ -44,6 +44,11 @@ export class PolymarketClient {
     this.log = logger || getLogger(cfg);
     this._clob = null;           // Real CLOB V2 client (lazy)
     this._signer = null;         // ethers wallet
+    // Overridable so the SDK wiring can be tested without the SDK and
+    // without a network. KI-001 - a constructor called with the wrong
+    // shape - survived for months precisely because this path could not
+    // be reached from a test.
+    this._importV2 = () => import(V2_PACKAGE);
     this._fetch = globalThis.fetch;
     // Caches
     this._marketsCache = { data: null, ts: 0 };
@@ -70,7 +75,7 @@ export class PolymarketClient {
     // Dynamic imports so paper mode never pulls these in.
     let v2, ethers;
     try {
-      v2 = await import(V2_PACKAGE);
+      v2 = await this._importV2();
     } catch (e) {
       throw new Error(
         `Live mode requires the V2 SDK '${V2_PACKAGE}'. ` +
@@ -102,29 +107,53 @@ export class PolymarketClient {
 
     // Use or derive credentials. The V2 SDK preserves the L1→L2 derive
     // pattern but exposes it as createOrDeriveApiCreds() in some builds.
+    // KI-001. The v1.1.0 constructor takes a SINGLE options object:
+    //   ({ host, chain, signer, creds, signatureType, funderAddress, ... })
+    // It was being called positionally, so host arrived as undefined and
+    // the SDK threw "Cannot read properties of undefined (reading
+    // 'endsWith')" before any request was made. Live order placement has
+    // therefore never worked against this SDK version. It failed safe -
+    // a crash sends no orders - but it failed silently, and a
+    // quarantined red test was carrying the evidence.
+    //
+    // Note the field is `chain`, not `chainId`.
     let creds = null;
     if (c.apiKey && c.apiSecret && c.apiPassphrase) {
       creds = { key: c.apiKey, secret: c.apiSecret, passphrase: c.apiPassphrase };
     } else {
-      const boot = new ClientCtor(c.host, c.chainId, signer);
-      const deriveFn = boot.createOrDeriveApiCreds || boot.createOrDeriveApiKey;
-      if (typeof deriveFn !== "function") {
+      const boot = new ClientCtor({ host: c.host, chain: c.chainId, signer });
+      // The SDK exposes deriveApiKey and createApiKey; the
+      // createOrDeriveApiCreds this code used to look for does not exist
+      // in any build of v1.1.0. Derive first: it is deterministic from
+      // the wallet and idempotent, whereas createApiKey mints a new
+      // credential server-side every time it is called.
+      let deriveErr = null;
+      if (typeof boot.deriveApiKey === "function") {
+        try {
+          creds = await boot.deriveApiKey();
+        } catch (e) { deriveErr = e; }
+      }
+      if (!creds && typeof boot.createApiKey === "function") {
+        creds = await boot.createApiKey();
+        this.log.info("Created new CLOB V2 API credentials");
+      }
+      if (!creds) {
         throw new Error(
-          "V2 SDK does not expose createOrDeriveApiCreds/createOrDeriveApiKey"
+          "V2 SDK exposes neither deriveApiKey nor createApiKey" +
+          (deriveErr ? ` (derive failed: ${deriveErr.message})` : "")
         );
       }
-      creds = await deriveFn.call(boot);
-      this.log.info("Derived CLOB V2 API credentials from wallet");
+      if (!deriveErr) this.log.info("Derived CLOB V2 API credentials from wallet");
     }
 
-    this._clob = new ClientCtor(
-      c.host,
-      c.chainId,
+    this._clob = new ClientCtor({
+      host: c.host,
+      chain: c.chainId,
       signer,
       creds,
-      c.signatureType,
-      c.funderAddress || undefined,
-    );
+      signatureType: c.signatureType,
+      funderAddress: c.funderAddress || undefined,
+    });
     return this._clob;
   }
 

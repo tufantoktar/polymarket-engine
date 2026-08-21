@@ -426,12 +426,33 @@ function captureLogger() {
   } catch (e) {
     err = e;
   }
-  assert("client: live without V2 SDK throws", !!err);
-  assert(
-    "client: error mentions V2 package",
-    err && /clob-client-v2/.test(err.message),
-    err?.message,
-  );
+  // The premise has to be stated rather than assumed. This assertion
+  // used to demand an error naming the package, which only holds when
+  // the package is absent - it is an optionalDependency, so in any
+  // environment that installed it the test failed for a reason unrelated
+  // to what it was checking. It spent months red while carrying the
+  // KI-001 evidence, which is how a broken constructor stayed hidden.
+  //
+  // The invariant that matters in both worlds is the same: live
+  // placement never quietly succeeds.
+  let sdkPresent = true;
+  try { await import("@polymarket/clob-client-v2"); } catch { sdkPresent = false; }
+
+  assert("client: live placement without working credentials throws", !!err,
+    `sdkPresent=${sdkPresent}`);
+  if (!sdkPresent) {
+    assert(
+      "client: with the SDK absent, the error names the package",
+      err && /clob-client-v2/.test(err.message),
+      err?.message,
+    );
+  } else {
+    assert(
+      "client: with the SDK present, the failure is not a malformed call",
+      err && !/Cannot read properties of undefined \(reading 'endsWith'\)/.test(err.message),
+      err?.message,
+    );
+  }
 }
 
 // ─── 19. PolymarketClient live with v1 version errors ──────────────────
@@ -464,6 +485,95 @@ function captureLogger() {
   let threw = false;
   try { t(0); } catch { threw = true; }
   assert("internal: rejects 0", threw);
+}
+
+// ─── 24. KI-001: the SDK constructor is called with the right shape ────
+//
+//  v1.1.0 takes a SINGLE options object. It was being called
+//  positionally, so host arrived as undefined and the SDK threw
+//  "Cannot read properties of undefined (reading 'endsWith')" before any
+//  request left the process. Live placement had therefore never worked.
+//
+//  It survived because this path could not be reached from a test: the
+//  SDK was imported directly, so exercising it meant having the SDK, a
+//  key and a network. The import is now injectable, and this asserts the
+//  call shape against a fake with no network involved.
+{
+  const cfg = baseCfg();
+  cfg.mode = "live";
+  cfg.clob.version = "v2";
+  cfg.clob.privateKey = "0x" + "a".repeat(64);
+  cfg.clob.chainId = 137;
+  cfg.clob.host = "https://clob.example.test";
+  cfg.clob.signatureType = 0;
+  cfg.clob.apiKey = cfg.clob.apiSecret = cfg.clob.apiPassphrase = "";
+
+  const ctorArgs = [];
+  const derived = { key: "k", secret: "s", passphrase: "p" };
+  let deriveCalls = 0, createCalls = 0;
+
+  class FakeClob {
+    constructor(...args) {
+      ctorArgs.push(args);
+      this.host = args[0]?.host;
+    }
+    async deriveApiKey() { deriveCalls++; return derived; }
+    async createApiKey() { createCalls++; return { key: "new" }; }
+  }
+
+  const client = new PolymarketClient(cfg, captureLogger().log);
+  client._importV2 = async () => ({ ClobClient: FakeClob });
+
+  let built = null, err = null;
+  try { built = await client._getClobClient(); } catch (e) { err = e; }
+
+  assert("KI-001: client is constructed without throwing", !err, err?.message);
+  assert("KI-001: constructor takes exactly one argument",
+    ctorArgs.every(a => a.length === 1), JSON.stringify(ctorArgs.map(a => a.length)));
+  assert("KI-001: that argument is an options object",
+    ctorArgs.every(a => a[0] && typeof a[0] === "object" && !Array.isArray(a[0])));
+
+  const final = ctorArgs[ctorArgs.length - 1]?.[0] || {};
+  assert("KI-001: host is passed, not undefined", final.host === cfg.clob.host,
+    String(final.host));
+  assert("KI-001: the chain field is named chain, not chainId",
+    final.chain === 137 && final.chainId === undefined,
+    JSON.stringify({ chain: final.chain, chainId: final.chainId }));
+  assert("KI-001: the signer is passed", !!final.signer);
+  assert("KI-001: derived creds are passed in", final.creds === derived);
+  assert("KI-001: signatureType is passed", final.signatureType === 0);
+
+  // Deriving is deterministic from the wallet; creating mints a new
+  // credential server-side on every call. Preferring derive keeps a
+  // restart from leaving a trail of orphaned API keys.
+  assert("KI-001: credentials are derived, not created", deriveCalls === 1 && createCalls === 0,
+    `derive=${deriveCalls} create=${createCalls}`);
+  assert("KI-001: the built client is returned and cached",
+    built instanceof FakeClob && (await client._getClobClient()) === built);
+}
+
+// ─── 25. Explicit credentials skip derivation entirely ─────────────────
+{
+  const cfg = baseCfg();
+  cfg.mode = "live";
+  cfg.clob.version = "v2";
+  cfg.clob.privateKey = "0x" + "a".repeat(64);
+  cfg.clob.apiKey = "K"; cfg.clob.apiSecret = "S"; cfg.clob.apiPassphrase = "P";
+
+  const ctorArgs = [];
+  let deriveCalls = 0;
+  class FakeClob {
+    constructor(o) { ctorArgs.push(o); }
+    async deriveApiKey() { deriveCalls++; return {}; }
+  }
+  const client = new PolymarketClient(cfg, captureLogger().log);
+  client._importV2 = async () => ({ ClobClient: FakeClob });
+  await client._getClobClient();
+
+  assert("KI-001: supplied credentials are used as-is",
+    ctorArgs.length === 1 && ctorArgs[0].creds?.key === "K");
+  assert("KI-001: no bootstrap client is built when creds are supplied",
+    deriveCalls === 0, `derive=${deriveCalls}`);
 }
 
 // ─── Summary ────────────────────────────────────────────────────────────

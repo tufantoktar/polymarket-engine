@@ -10,11 +10,33 @@ block until it is fixed.
 
 ## KI-001 — CLOB V2 client is constructed with the wrong call shape
 
-- **Stage:** `v2` (quarantined)
-- **Failing assertion:** `testV2Migration.js` #18 — "client: error mentions V2 package"
+- **Stage:** `v2` — **KAPALI**, karantinadan çıktı, artık zorunlu
 - **Opened:** 2026-08-11
-- **Expiry:** 2026-09-11
+- **Closed:** 2026-08-21
 - **Severity:** HIGH — blocks live mode entirely
+
+### Düzeltme (21 Ağustos 2026)
+
+Constructor tek options objesi alıyor, ve alan adı `chain` — `chainId`
+değil. Pozisyonel çağrı yüzünden `host` undefined geliyordu.
+
+İkinci bir katman daha vardı: kod `createOrDeriveApiCreds` /
+`createOrDeriveApiKey` arıyordu, oysa SDK v1.1.0'da bu isimde bir metot
+**yok**. Gerçek isimler `deriveApiKey` ve `createApiKey`. Yani
+constructor düzeltilse bile kimlik türetme adımı patlardı. Artık önce
+`deriveApiKey` deneniyor — cüzdandan deterministik ve idempotent —
+başarısız olursa `createApiKey`'e düşülüyor.
+
+`_importV2` enjekte edilebilir hale getirildi. Bu kusurun aylarca
+yaşamasının sebebi buydu: SDK doğrudan import edildiği için yolu test
+etmek SDK, anahtar ve ağ gerektiriyordu. 12 yeni iddia çağrı şeklini
+sahte bir SDK ile, ağa çıkmadan doğruluyor.
+
+`testV2Migration` #18 de düzeltildi. "SDK yokken açık hata ver" diye
+yazılmıştı ama paket bir `optionalDependency` ve kurulu olduğu her
+ortamda test ölçmediği bir sebepten kırmızı kalıyordu — KI-001'in
+kanıtını taşıyan test, kendi öncülü yanlış olduğu için kimsenin
+bakmadığı bir kırmızıya dönüşmüştü. Artık öncül açıkça yoklanıyor.
 - **Money at risk today:** none (engine runs paper/collect only)
 
 ### Symptom
