@@ -1,0 +1,121 @@
+# ═══════════════════════════════════════════════════════════════════════
+#  CI — the gate that cannot be skipped
+# ═══════════════════════════════════════════════════════════════════════
+#  npm run verify already runs locally, but locally is advice: --no-verify
+#  skips a hook, and an agent working in a terminal can simply not run it.
+#  This project exists partly to stop an automated contributor from
+#  pushing a dangerous change to execution or risk logic, and that
+#  promise only means something when the check runs somewhere the
+#  contributor does not control.
+#
+#  No stage may use continue-on-error. A job that reports green while a
+#  stage failed is worse than no job at all, because it converts an
+#  unknown into a false assurance.
+# ═══════════════════════════════════════════════════════════════════════
+name: verify
+
+on:
+  push:
+    branches: ["main", "feature/**", "fix/**"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: verify (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The VPS runs 24 and development happens on 22. Testing one and
+        # deploying the other is how a version-specific failure reaches
+        # production unnoticed.
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      # CI must never hold a wallet secret. If one is ever added to the
+      # repository secrets, the build stops rather than quietly running
+      # with the ability to move money.
+      - name: refuse to run with credentials or live flags present
+        run: |
+          fail=0
+          for v in PRIVATE_KEY CLOB_API_KEY CLOB_API_SECRET CLOB_API_PASSPHRASE \
+                   ENABLE_LIVE_TRADING TRADING_MODE FUNDER_ADDRESS; do
+            if [ -n "${!v:-}" ]; then
+              echo "::error::$v is set in CI. Tests must never run with credentials or live flags."
+              fail=1
+            fi
+          done
+          exit $fail
+
+      - run: npm ci
+
+      # The full matrix: static, unit, integration, v2, safety. Every
+      # suite runs behind the network guard, so a test that reaches the
+      # internet fails by name instead of intermittently.
+      - run: npm run verify
+
+  secret-scan:
+    name: secret scan
+    runs-on: ubuntu-latest
+    steps:
+      # Full history: the local scan only ever sees what is staged, so a
+      # key committed last month would never be found by it.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - run: node scripts/checkSecrets.js
+
+  protected-paths:
+    name: protected paths
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # This does not block. It makes a change to money-moving code
+      # impossible to merge without having seen that it is one - the
+      # failure mode being a diff that looks routine because the
+      # dangerous file is on line 400 of a long changeset.
+      - name: flag changes to money-moving code
+        run: |
+          base="${{ github.event.pull_request.base.sha }}"
+          head="${{ github.event.pull_request.head.sha }}"
+          touched=$(git diff --name-only "$base" "$head" | grep -E \
+            'src/live/(risk_engine|execution_engine|execution|state|monitoring|config)/|src/live/(retry|polymarketClient)\.js' || true)
+          if [ -n "$touched" ]; then
+            {
+              echo "### Protected paths touched"
+              echo ""
+              echo "This PR changes code that can move money. Read the diff, not the summary."
+              echo ""
+              echo '```'
+              echo "$touched"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "$touched" | while read -r f; do
+              echo "::warning file=$f::protected path — review this change deliberately"
+            done
+          else
+            echo "No protected paths touched." >> "$GITHUB_STEP_SUMMARY"
+          fi

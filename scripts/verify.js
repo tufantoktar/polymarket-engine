@@ -29,6 +29,7 @@
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import fs from "node:fs";
+import { pathToFileURL } from "node:url";
 
 const repoRoot = process.cwd();
 
@@ -42,6 +43,9 @@ const STAGES = [
       { name: "syntax",          script: "scripts/checkSyntax.js" },
       { name: "import-boundary", script: "scripts/checkLiveImports.js" },
       { name: "config-defaults", script: "scripts/checkConfigDefaults.js" },
+      // Local scan covers tracked files; CI repeats it over full history,
+      // because a key committed last month is invisible to a staged diff.
+      { name: "secret-scan",     script: "scripts/checkSecrets.js" },
     ],
   },
   {
@@ -54,6 +58,7 @@ const STAGES = [
       { name: "reliability", script: "scripts/testReliabilityModules.js" },
       { name: "hardening",   script: "scripts/testHardeningModules.js" },
       { name: "retry",       script: "scripts/testRetry.js" },
+      { name: "net-guard",   script: "scripts/testNetGuard.js" },
       { name: "price-band",  script: "scripts/testPriceBand.js" },
       { name: "sizing-caps", script: "scripts/testSizingCaps.js" },
       { name: "trade-dedup", script: "scripts/testTradeDedup.js" },
@@ -170,10 +175,21 @@ function runStep(step) {
       output: `verify: script not found: ${step.script}` };
   }
 
+  // Every suite runs behind the network guard. Hermeticity used to be a
+  // convention, and a convention holds until someone forgets. The whole
+  // suite already passes with the network removed; this makes a future
+  // accidental call fail by name rather than intermittently.
+  const guard = path.join(repoRoot, "scripts", "netGuard.mjs");
+  const guardOpt = `--import ${pathToFileURL(guard).href}`;
+
   const res = spawnSync(process.execPath, [scriptPath], {
     cwd: repoRoot,
     encoding: "utf8",
-    env: { ...process.env, NODE_ENV: process.env.NODE_ENV || "test" },
+    env: {
+      ...process.env,
+      NODE_ENV: process.env.NODE_ENV || "test",
+      NODE_OPTIONS: [process.env.NODE_OPTIONS, guardOpt].filter(Boolean).join(" "),
+    },
   });
 
   const output = `${res.stdout || ""}${res.stderr || ""}`;
