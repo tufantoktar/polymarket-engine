@@ -394,10 +394,36 @@ export class PolymarketClient {
       throw new Error("V2 SDK exposes neither createAndPostOrder nor createAndSubmitOrder");
     }
 
-    const resp = await withRetry(
-      () => submit(v2Args, v2Opts, otypeVal),
-      { label: "clob:placeOrder", logger: this.log }
-    );
+    // ─── Submitted exactly once. Never retried. ──────────────────────
+    //
+    // createAndPostOrder signs and posts a NEW order on every call, with
+    // a fresh salt and no client-side idempotency key, so the exchange
+    // cannot recognise a second attempt as the same intent. Wrapping it
+    // in withRetry turned one timed-out order into three real ones, which
+    // a test now demonstrates rather than assumes.
+    //
+    // The dangerous case is not a rejected order but an ACCEPTED one
+    // whose response is lost: the exchange holds the position, the client
+    // sees ETIMEDOUT, and a retry opens a second position. No error at
+    // this layer can distinguish "never arrived" from "arrived, answer
+    // lost", so retrying is guessing with real money.
+    //
+    // A lost order is recoverable - reconciliation finds it, or the
+    // signal fires again. A duplicate order is not. The asymmetry decides
+    // this: submit once, and hand the caller the uncertainty explicitly.
+    let resp;
+    try {
+      resp = await submit(v2Args, v2Opts, otypeVal);
+    } catch (e) {
+      // submitUncertain marks the one thing the caller must know: this
+      // order may or may not exist on the exchange. Treating it as a
+      // clean failure is what makes duplicates in the first place.
+      e.submitUncertain = true;
+      this.log.errorEvent("clob:placeOrder:submit_failed", e, {
+        tokenId, side, submitUncertain: true,
+      });
+      throw e;
+    }
     this.log.trade("live:placeOrder", {
       order: sanitizeOrderForLog(order),
       response: sanitizeOrderForLog(resp),
