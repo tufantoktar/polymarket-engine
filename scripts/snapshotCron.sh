@@ -11,7 +11,7 @@ done
 export PATH
 cd /root/polymarket-engine || exit 1
 LOG=data/pricehistory/cron.log
-if node scripts/snapshotPriceHistory.js --days=10 >> "$LOG" 2>&1; then
+if node scripts/snapshotPriceHistory.js --days=2 >> "$LOG" 2>&1; then
   echo "$(date -Is) capture OK" >> "$LOG"
 else
   echo "$(date -Is) capture FAILED rc=$?" >> "$LOG"
