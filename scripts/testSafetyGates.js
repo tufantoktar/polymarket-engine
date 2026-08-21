@@ -134,7 +134,7 @@ const riskEngine = over => new LiveRiskEngine(testCfg(over), silentLog);
   let breaches = 0, checked = 0;
   for (let size = 1; size <= 400; size += 7) {
     for (const price of [0.05, 0.2, 0.5, 0.8, 0.95]) {
-      const out = r.checkOrder({ size, price });
+      const out = r.checkOrder({ size, price, side: "BUY" });
       if (!out.ok) continue;
       checked++;
       if (out.adjustedSize * price > maxNotional + 1e-9) breaches++;
@@ -151,13 +151,13 @@ const riskEngine = over => new LiveRiskEngine(testCfg(over), silentLog);
   const maxConc = 3;
   const r = riskEngine({ risk: { maxConcurrentOrders: maxConc } });
   for (let i = 0; i < maxConc; i++) r.trackOrder(`o${i}`);
-  const out = r.checkOrder({ size: 10, price: 0.5 });
+  const out = r.checkOrder({ size: 10, price: 0.5, side: "BUY" });
   assert("S8", "order beyond the concurrency cap is rejected",
     out.ok === false && String(out.reason).includes("concurrent"),
     JSON.stringify(out));
   r.untrackOrder("o0");
   assert("S8", "freeing a slot allows the next order",
-    r.checkOrder({ size: 10, price: 0.5 }).ok === true);
+    r.checkOrder({ size: 10, price: 0.5, side: "BUY" }).ok === true);
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -169,7 +169,7 @@ const riskEngine = over => new LiveRiskEngine(testCfg(over), silentLog);
   r.recordRealizedPnl(-50);
   assert("S16", "daily loss limit halts", r.isHalted() === true);
   assert("S16", "a halted engine rejects orders",
-    r.checkOrder({ size: 10, price: 0.5 }).ok === false);
+    r.checkOrder({ size: 10, price: 0.5, side: "BUY" }).ok === false);
   r.recordRealizedPnl(+1000);
   assert("S3", "a halt does not clear itself on later success",
     r.isHalted() === true);

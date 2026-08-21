@@ -24,6 +24,42 @@ function ymd(ts = Date.now()) {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,"0")}-${String(d.getUTCDate()).padStart(2,"0")}`;
 }
 
+/**
+ * Validate an order's inputs before any limit is computed.
+ *
+ * Every numeric guard below compares against a threshold, and every
+ * comparison against NaN is false, so a malformed order passes the
+ * entire chain untouched rather than being caught by it. Type and range
+ * have to be established first or the limits are decorative.
+ *
+ * Side is required rather than defaulted. Direction is computed as
+ * (side === "BUY" ? +size : -size), so a missing or lowercase side does
+ * not fail - it silently becomes a sell.
+ */
+export function validateOrderInput(order) {
+  if (!order || typeof order !== "object") {
+    return { ok: false, reason: "invalid_order:not_an_object" };
+  }
+  const { price, size, side } = order;
+
+  if (typeof price !== "number" || !Number.isFinite(price) || price <= 0 || price >= 1) {
+    return { ok: false, reason: `invalid_price:${String(price)}` };
+  }
+  if (typeof size !== "number" || !Number.isFinite(size) || size <= 0) {
+    return { ok: false, reason: `invalid_size:${String(size)}` };
+  }
+  if (side !== "BUY" && side !== "SELL") {
+    return { ok: false, reason: `invalid_side:${String(side)}` };
+  }
+  for (const f of ["currentPosition", "expectedPrice"]) {
+    if (order[f] === undefined || order[f] === null) continue;
+    if (typeof order[f] !== "number" || !Number.isFinite(order[f])) {
+      return { ok: false, reason: `invalid_${f}:${String(order[f])}` };
+    }
+  }
+  return { ok: true };
+}
+
 export class LiveRiskEngine {
   constructor(cfg = LIVE_CONFIG, logger = null) {
     this.cfg = cfg;
@@ -112,6 +148,13 @@ export class LiveRiskEngine {
    *   @param {Object} [order.book]             orderbook snapshot
    */
   checkOrder(order) {
+    // Inputs first. A malformed order must never reach a limit check.
+    const valid = validateOrderInput(order);
+    if (!valid.ok) {
+      this.recordReject(valid.reason);
+      return valid;
+    }
+
     this._maybeRollDay();
     const r = this.cfg.risk;
 

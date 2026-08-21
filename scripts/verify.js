@@ -85,8 +85,7 @@ const STAGES = [
   {
     id: "safety",
     label: "Safety regression gates",
-    tier: "quarantined",
-    knownIssue: "KI-002",
+    tier: "mandatory",
     steps: [
       { name: "safety-gates", script: "scripts/testSafetyGates.js" },
     ],

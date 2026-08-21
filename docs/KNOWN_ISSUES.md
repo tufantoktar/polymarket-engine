@@ -80,8 +80,11 @@ Do **not** close this by weakening assertion #18.
 ## KI-002 — LiveRiskEngine does not validate its inputs
 
 **Bulunma:** 21 Ağustos 2026, `scripts/testSafetyGates.js` ilk koşusu
-**Durum:** AÇIK — karantinada, canlı işlem öncesi kapatılması zorunlu
-**Son kullanma:** 21 Eylül 2026
+**Durum:** KAPALI — 21 Ağustos 2026, aynı gün düzeltildi
+**Düzeltme:** `validateOrderInput`, `checkOrder`'ın ilk adımı olarak
+eklendi. Tip ve aralık önce kuruluyor, limitler ondan sonra hesaplanıyor.
+`side` artık zorunlu ve varsayılanı yok. Süit karantinadan zorunluya
+terfi etti; 27/27.
 
 ### Kök neden
 
